@@ -11,14 +11,32 @@
 // Además sigue las mejoras de la memoria que el usuario aceptó en la conversación:
 // cuando una termina, deja el aviso en el chat y, si se instaló, le pide a
 // Claude que retome lo que había fallado.
+//
+// Y es quien pone a trabajar al agente que hace cada mejora: cuando el
+// guardián deja lista la copia del código, lanza al agente de fondo dentro de
+// esta conversación (con la sesión de Claude que ya está abierta, sin ninguna
+// llave), le aprueba solo lo que puede hacer y le niega todo lo demás, sin
+// que la app le pregunte nada al usuario, y avisa cuando termina.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Avisos, Contexto, Entrega } from '../types'
+import type { AgenteLanzado, Agentes, Avisos, Contexto, Entrega } from '../types'
+import {
+  enRegla,
+  HERRAMIENTAS,
+  INSTRUCCIONES_AGENTE,
+  motivoDelCorte,
+  NOMBRE_AGENTE,
+  revisar,
+  SIN_ENCARGO,
+  TIPO_AGENTE,
+} from './agente'
+import type { Encargo } from './agente'
 import { aSesionApp, motivoDe, textoDe, textoSuelto } from './datos'
 import type { SesionApp } from './datos'
 import { grupoDelResumen, provisorio } from './grupos'
 import { leerEstado, retomar } from './mejoras'
+import type { EstadoMejoras } from './mejoras'
 import { actualizacion, claveDe, ID_SECCION, seccion } from './seccion'
 
 const SERVIDOR = 'memoria'
@@ -35,6 +53,9 @@ const ESPERA_REVISION_MS = 3_000
 // Mientras haya una mejora en curso lanzada desde acá, cada cuánto se pregunta por ella.
 const CADA_MEJORA_MS = 10_000
 const HERRAMIENTA_MEJORAR = 'mcp__memoria__memoria_mejorar'
+// La que usa el mod para anotar cómo le va al agente: Claude no la llama.
+const HERRAMIENTA_AGENTE = 'mcp__memoria__memoria_mejora_agente'
+const SIN_RESUMEN = 'El agente terminó, pero no quedó registrado su resumen.'
 
 // Cambiar la etiqueta si cambian los campos (o si lo guardado por una versión
 // anterior ya no sirve): descarta lo que sobrevive a la recarga.
@@ -48,6 +69,10 @@ const entrega = atom({ plugin: 'memoria', key: 'entrega' } as const, SIN_ENTREGA
 const SIN_AVISOS: Avisos = { mostrados: [] }
 const avisos = atom({ plugin: 'memoria', key: 'avisos' } as const, SIN_AVISOS, {
   shape: 'avisos-1',
+})
+const SIN_AGENTES: Agentes = { lanzados: {} }
+const agentes = atom({ plugin: 'memoria', key: 'agentes' } as const, SIN_AGENTES, {
+  shape: 'agentes-1',
 })
 
 // ---------- pedidos ----------
@@ -206,6 +231,243 @@ function reintentar($: EngineInterface, intento: number): void {
   })
 }
 
+// ---------- agentes ----------
+
+// Los agentes de la conversación que ya se sabe que no son de la memoria.
+const ajenos = new Set<string>()
+// Mientras se lanza uno: su primera llamada no puede adelantarse a que quede anotado.
+let lanzando: Promise<void> | null = null
+let tipoRegistrado = false
+// Agentes que la app dejó de nombrar, o que da por terminados sin que haya
+// llegado su fin de turno: se les da una vuelta más antes de soltarlos.
+const dudosos = new Set<string>()
+
+const sin = (prev: Agentes, agentId: string): Agentes => {
+  const { [agentId]: _, ...resto } = prev.lanzados
+
+  return { lanzados: resto }
+}
+
+const con = (prev: Agentes, agentId: string, cambio: Partial<AgenteLanzado>): Agentes => {
+  const a = prev.lanzados[agentId]
+
+  return a === undefined ? prev : { lanzados: { ...prev.lanzados, [agentId]: { ...a, ...cambio } } }
+}
+
+// Declara el tipo de agente. La app lo acepta recién cuando la conversación
+// está armada: si todavía no, se prueba de nuevo antes de lanzar.
+async function registrarTipo($: EngineInterface): Promise<boolean> {
+  if (tipoRegistrado) return true
+  try {
+    await $.agent.register({
+      name: NOMBRE_AGENTE,
+      description:
+        'Agente de mantenimiento de la memoria. Lo lanza solo el mod de la memoria cuando el usuario aceptó una mejora: no es para delegarle tareas.',
+      prompt: INSTRUCCIONES_AGENTE,
+      tools: [...HERRAMIENTAS],
+      model: 'inherit',
+      // Nunca le pregunta nada al usuario: lo que el mod no aprueba, se niega.
+      permissionMode: 'dontAsk',
+      maxTurns: 200,
+      background: true,
+      omitClaudeMd: true,
+    })
+    tipoRegistrado = true
+  } catch {
+    // Queda para el próximo intento.
+  }
+
+  return tipoRegistrado
+}
+
+// De quién es una llamada hecha dentro de un agente: de uno de la memoria
+// (con su encargo), de uno de la memoria del que no quedó nada anotado, o de
+// un agente que no tiene nada que ver (null).
+async function agenteDe($: EngineInterface, agentId: string): Promise<AgenteLanzado | 'sin-encargo' | null> {
+  if (ajenos.has(agentId)) return null
+  const anotado = async () => (await read($, agentes)).lanzados[agentId]
+  let a = await anotado()
+  if (a === undefined && lanzando) {
+    await lanzando
+    a = await anotado()
+  }
+  if (a !== undefined) return a
+  let lista
+  try {
+    lista = await $.agent.list()
+  } catch {
+    return null
+  }
+  if (lista.some(x => x.id === agentId && x.type === TIPO_AGENTE)) return 'sin-encargo'
+  ajenos.add(agentId)
+
+  return null
+}
+
+// Le anota al servicio un paso del agente de una mejora. Devuelve si valió.
+async function avisarAgente(
+  $: EngineInterface,
+  sesion: string,
+  id: number,
+  paso: 'empezo' | 'termino' | 'fallo',
+  texto?: string,
+): Promise<boolean> {
+  const r = await pedirMemoria($, 'memoria_mejora_agente', {
+    id,
+    sesion,
+    paso,
+    ...(texto === undefined ? {} : { texto }),
+  })
+  const leido: unknown = JSON.parse(r)
+
+  return typeof leido === 'object' && leido !== null && (leido as { ok?: unknown }).ok === true
+}
+
+const TERMINADO = ['completed', 'failed', 'killed']
+
+// El agente recién lanzado, buscado entre los de la conversación por su
+// descripción: para cuando la app no devuelve su id al lanzarlo.
+async function buscarAgente($: EngineInterface, descripcion: string): Promise<string | undefined> {
+  const { lanzados } = await read($, agentes)
+  const lista = await $.agent.list().catch(() => [])
+
+  return lista.find(
+    x =>
+      x.type === TIPO_AGENTE &&
+      x.description === descripcion &&
+      !(x.id in lanzados) &&
+      !TERMINADO.includes(x.status),
+  )?.id
+}
+
+// Toma una mejora para esta conversación y lanza su agente, de fondo.
+async function lanzarAgente($: EngineInterface, sesion: string, encargo: Encargo): Promise<void> {
+  if (!(await registrarTipo($))) return
+  // Si la tomó otra conversación, o ya hay demasiados agentes, no es para esta.
+  if (!(await avisarAgente($, sesion, encargo.id, 'empezo'))) return
+  let listo: () => void = () => undefined
+  lanzando = new Promise<void>(resolver => {
+    listo = resolver
+  })
+  let motivo: string
+  try {
+    const descripcion = `Mejora ${encargo.id} de la memoria`
+    const r = await $.agent.spawn({
+      prompt: encargo.pedido,
+      description: descripcion,
+      subagentType: TIPO_AGENTE,
+      cwd: encargo.copia,
+    })
+    const agentId = r.deny === undefined ? (r.agentId ?? (await buscarAgente($, descripcion))) : undefined
+    if (agentId !== undefined) {
+      await update($, agentes, prev => ({
+        lanzados: {
+          ...prev.lanzados,
+          [agentId]: { mejora: encargo.id, copia: encargo.copia, cargo: encargo.cargo },
+        },
+      }))
+
+      return
+    }
+    motivo = `Claude no dejó lanzar el agente: ${r.deny ?? 'no arrancó ninguno'}`
+  } catch (err) {
+    motivo = `No pude lanzar el agente: ${motivoDe(err)}`
+  } finally {
+    lanzando = null
+    listo()
+  }
+  await avisarAgente($, sesion, encargo.id, 'fallo', motivo).catch(() => false)
+}
+
+// Anota cómo terminó un agente y se lo avisa al servicio. Si el servicio no
+// responde, el aviso queda guardado y sale en la próxima vuelta.
+async function terminoAgente(
+  $: EngineInterface,
+  agentId: string,
+  aviso: NonNullable<AgenteLanzado['aviso']>,
+): Promise<void> {
+  const a = (await read($, agentes)).lanzados[agentId]
+  if (a === undefined) return
+  dudosos.delete(agentId)
+  // Al que el guardián ya le había sacado la mejora no le queda nada por avisar.
+  if (a.anulado) {
+    await update($, agentes, prev => sin(prev, agentId))
+
+    return
+  }
+  await update($, agentes, prev => con(prev, agentId, { aviso }))
+  const c = await read($, contexto)
+  if (!c || !c.sesion) return
+  try {
+    await avisarAgente($, c.sesion, a.mejora, aviso.paso, aviso.texto)
+    await update($, agentes, prev => sin(prev, agentId))
+  } catch {
+    // El servicio no respondió: se avisa en la próxima vuelta.
+  }
+  vigilar($)
+}
+
+// Lo que toca hacer con los agentes en cada vuelta: avisar lo que quedó sin
+// avisar, soltar a los que ya no corren o ya no tienen la mejora, y lanzar
+// los que esperan.
+async function atenderAgentes($: EngineInterface, sesion: string, estado: EstadoMejoras): Promise<void> {
+  for (const [agentId, a] of Object.entries((await read($, agentes)).lanzados)) {
+    if (!a.aviso) continue
+    try {
+      await avisarAgente($, sesion, a.mejora, a.aviso.paso, a.aviso.texto)
+      await update($, agentes, prev => sin(prev, agentId))
+    } catch {
+      // Sigue guardado para la próxima vuelta.
+    }
+  }
+
+  const sinAvisar = Object.entries((await read($, agentes)).lanzados).filter(([, a]) => !a.aviso)
+  if (sinAvisar.length > 0) {
+    const lista = await $.agent.list().catch(() => null)
+    for (const [agentId, a] of sinAvisar) {
+      const enLaApp = lista?.find(x => x.id === agentId)
+      const andando = enLaApp !== undefined && !TERMINADO.includes(enLaApp.status)
+      if (a.anulado) {
+        // Se olvida cuando la app ya no lo tiene corriendo.
+        if (lista !== null && !andando) await update($, agentes, prev => sin(prev, agentId))
+        continue
+      }
+      // Para el servicio ya no corre acá: el guardián le sacó la mejora.
+      if (!estado.conAgente.includes(a.mejora)) {
+        await update($, agentes, prev => con(prev, agentId, { anulado: true }))
+        continue
+      }
+      if (lista === null || andando) {
+        dudosos.delete(agentId)
+        continue
+      }
+      if (enLaApp?.status === 'failed' || enLaApp?.status === 'killed') {
+        await terminoAgente($, agentId, { paso: 'fallo', texto: 'El agente se detuvo antes de terminar.' })
+        continue
+      }
+      // Terminó, o la app ya no lo nombra: su fin de turno puede estar por llegar.
+      if (!dudosos.has(agentId)) {
+        dudosos.add(agentId)
+        continue
+      }
+      await terminoAgente(
+        $,
+        agentId,
+        enLaApp === undefined
+          ? { paso: 'fallo', texto: 'El agente dejó de estar en la conversación antes de terminar.' }
+          : { paso: 'termino', texto: SIN_RESUMEN },
+      )
+    }
+  }
+
+  const propias = Object.values((await read($, agentes)).lanzados)
+    .filter(a => !a.anulado)
+    .map(a => a.mejora)
+  for (const encargo of estado.paraAgente) {
+    if (!propias.includes(encargo.id)) await lanzarAgente($, sesion, encargo)
+  }
+}
+
 // ---------- mejoras ----------
 
 let vigia: Timer | undefined
@@ -213,15 +475,26 @@ let revisando = false
 
 // Pregunta por las mejoras de esta conversación. Las que terminaron se
 // muestran en el chat y, si alguna se instaló, se le pide a Claude que retome
-// lo que había fallado. Mientras quede alguna en curso, sigue preguntando.
+// lo que había fallado. De paso avisa qué agentes siguen andando acá y lanza
+// los que esperan. Mientras quede algo en curso, sigue preguntando.
 async function revisarMejoras($: EngineInterface): Promise<void> {
   if (revisando) return
   revisando = true
   try {
     const c = await read($, contexto)
     if (!c || !c.sesion) return
+    // Los agentes de acá que siguen en marcha: el guardián se entera por este aviso.
+    const andando = Object.values((await read($, agentes)).lanzados)
+      .filter(a => !a.anulado)
+      .map(a => a.mejora)
     const pedir = async (vistos: number[]) =>
-      leerEstado(await pedirMemoria($, 'memoria_mejora_estado', { sesion: c.sesion, vistos }))
+      leerEstado(
+        await pedirMemoria($, 'memoria_mejora_estado', {
+          sesion: c.sesion,
+          vistos,
+          ...(andando.length > 0 ? { agentes: andando } : {}),
+        }),
+      )
     let { mostrados } = await read($, avisos)
     let estado = await pedir(mostrados)
     // Lo que el servicio ya no devuelve quedó anotado como avisado.
@@ -247,7 +520,9 @@ async function revisarMejoras($: EngineInterface): Promise<void> {
     }
     const anotados = mostrados
     await update($, avisos, () => ({ mostrados: anotados }))
-    if (estado.enCurso.length > 0 || mostrados.length > 0) vigilar($)
+    await atenderAgentes($, c.sesion, estado).catch(() => undefined)
+    const conAgentes = Object.keys((await read($, agentes)).lanzados).length > 0
+    if (estado.enCurso.length > 0 || mostrados.length > 0 || conAgentes || estado.paraAgente.length > 0) vigilar($)
     else dejarDeVigilar()
   } catch {
     // El servicio no respondió: se pregunta de nuevo en la próxima vuelta, o
@@ -300,12 +575,15 @@ async function revisarGrupo($: EngineInterface): Promise<void> {
   await lanzar($, 0, app)
 }
 
-function estado(c: Contexto | null, e: Entrega): string {
+function estado(c: Contexto | null, e: Entrega, a: Agentes): string {
   if (!c) return 'Memoria: todavía no registré esta conversación.'
   const lineas = [`Memoria: grupo ${c.grupo}, conversación ${c.sesion}.`]
   if (!c.deLaApp) lineas.push('El grupo salió de la carpeta (la app no respondió).')
   lineas.push(c.error === null ? 'El servicio respondió bien.' : `El servicio no respondió: ${c.error}`)
   if (e.clave !== claveDe(c)) lineas.push('Claude recibe esto con tu próximo mensaje.')
+  for (const agente of Object.values(a.lanzados)) {
+    if (!agente.anulado && !agente.aviso) lineas.push(`Un agente trabaja de fondo en la mejora ${agente.mejora}.`)
+  }
   if (c.resumen !== null) lineas.push('', c.resumen)
 
   return lineas.join('\n')
@@ -324,6 +602,7 @@ export const register: Register = on => {
     // Al empezar, y también al recargarse el mod: el resumen se lee de nuevo
     // y, si cambió, Claude lo recibe con el próximo mensaje.
     void lanzar($)
+    void registrarTipo($)
     try {
       await $.command.register({
         name: 'memoria',
@@ -407,6 +686,17 @@ export const register: Register = on => {
       compusoDesdeMensaje = true
       await update($, entrega, prev => (prev.compuesto ? prev : { compuesto: true, clave: null }))
     }
+    // Terminó un agente: si es de la memoria, lo último que dijo es su informe.
+    if (e.agentId !== undefined && !ajenos.has(e.agentId)) {
+      const informe = e.answer.trim()
+      await terminoAgente(
+        $,
+        e.agentId,
+        e.reason === 'answer' && informe !== ''
+          ? { paso: 'termino', texto: informe }
+          : { paso: 'fallo', texto: motivoDelCorte(e.reason) },
+      ).catch(() => undefined)
+    }
 
     return r
   })
@@ -441,9 +731,55 @@ export const register: Register = on => {
     return r
   })
 
+  // ---------- los límites del agente de mantenimiento ----------
+
+  // Cada cosa que quiere hacer pasa por acá: lo que puede se deja pasar con
+  // la ruta completa dentro de su copia (y `cargo` cambiado por el de su
+  // mejora); lo demás se niega. Las llamadas de la conversación y de otros
+  // agentes siguen de largo.
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId === undefined) return next(e)
+    const a = await agenteDe($, e.agentId)
+    if (a === null) return next(e)
+    if (a === 'sin-encargo') return { deny: SIN_ENCARGO }
+    const v = revisar(a, e.tool, e as unknown as Record<string, unknown>)
+    if ('deny' in v) return { deny: v.deny }
+
+    return next({ ...e, ...v.cambio } as typeof e)
+  }).catch(($, e, next) => {
+    if (next.called || e.agentId === undefined || ajenos.has(e.agentId)) return next(e)
+
+    return { deny: 'Falló el control de la memoria: no hagas nada más y terminá ahora.' }
+  })
+
+  // El permiso: lo que quedó en regla se aprueba sin preguntarle al usuario;
+  // cualquier otra cosa del agente se niega, también sin preguntar.
+  on('tool.check', async ($, e, next) => {
+    if (e.agentId === undefined) return next(e)
+    const a = await agenteDe($, e.agentId)
+    if (a === null) return next(e)
+    if (a === 'sin-encargo') return { decision: 'deny' as const, reason: SIN_ENCARGO }
+    const args = typeof e.input === 'object' && e.input !== null ? (e.input as Record<string, unknown>) : {}
+    const motivo = enRegla(a, e.tool, args)
+
+    return motivo === null ? { decision: 'allow' as const } : { decision: 'deny' as const, reason: motivo }
+  }).catch(($, e, next) => {
+    if (e.agentId === undefined || ajenos.has(e.agentId)) return next(e)
+
+    return { decision: 'deny' as const, reason: 'Falló el control de la memoria.' }
+  })
+
+  // Al agente lo lanza el mod: Claude no lo ve entre los que puede usar.
+  on('agent.offer', { agent: 'memoria:mantenimiento' }, () => ({ isOffered: false }))
+
+  // Y la herramienta con que el mod anota cómo le va al agente no es para Claude.
+  on('tool.call', { tool: HERRAMIENTA_AGENTE }, () => ({
+    deny: 'Esta herramienta la usa sola la memoria: no hace falta llamarla.',
+  }))
+
   on('command.run', { command: 'memoria' }, async $ => {
     await lanzar($)
 
-    return { text: estado(await read($, contexto), await read($, entrega)) }
+    return { text: estado(await read($, contexto), await read($, entrega), await read($, agentes)) }
   })
 }

@@ -1,6 +1,7 @@
 //! Etapa 3, lado del servicio: reportar una falla, preguntar, aceptar o
-//! rechazar, las señales y los avisos para el chat. El trabajo del guardián
-//! se imita cambiando el estado a mano.
+//! rechazar, las señales, los avisos para el chat y el buzón entre el
+//! guardián y el mod que lanza al agente. El trabajo del guardián se imita
+//! cambiando el estado a mano.
 
 mod comun;
 
@@ -8,7 +9,7 @@ use chrono::Utc;
 use comun::{busqueda, empezar, estado, nota};
 use memoria::error::Error;
 use memoria::estado::Estado;
-use memoria::mcp::{self, PedidoEstado, PedidoMejorar, PedidoRechazar, PedidoReportar};
+use memoria::mcp::{self, PedidoAgente, PedidoEstado, PedidoMejorar, PedidoRechazar, PedidoReportar};
 use memoria::modelo::TipoNota;
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -35,10 +36,58 @@ async fn estado_de(pool: &SqlitePool, id: i64) -> String {
 
 /// Lo que ve el mod de una conversación: ids en curso y avisos pendientes.
 async fn avisos(e: &Estado, sesion: &str, vistos: &[i64]) -> (Vec<i64>, Vec<Value>) {
-    let pedido = PedidoEstado { id: None, sesion: Some(sesion.into()), vistos: vistos.to_vec() };
+    let pedido = PedidoEstado { sesion: Some(sesion.into()), vistos: vistos.to_vec(), ..PedidoEstado::default() };
     let v: Value = serde_json::from_str(&mcp::mejora_estado(e, &pedido).await.unwrap()).unwrap();
     let en_curso = v["en_curso"].as_array().unwrap().iter().map(|i| i.as_i64().unwrap()).collect();
     (en_curso, v["avisos"].as_array().unwrap().clone())
+}
+
+fn ids(lista: &Value) -> Vec<i64> {
+    lista.as_array().unwrap().iter().map(|i| i.as_i64().unwrap_or_else(|| i["id"].as_i64().unwrap())).collect()
+}
+
+/// Lo que ve el mod sobre agentes: qué puede lanzar esta conversación y qué
+/// agentes suyos siguen anotados. `agentes` son los que avisa que siguen andando.
+async fn agentes(e: &Estado, sesion: &str, andando: &[i64]) -> (Vec<i64>, Vec<i64>) {
+    let pedido = PedidoEstado { sesion: Some(sesion.into()), agentes: andando.to_vec(), ..PedidoEstado::default() };
+    let v: Value = serde_json::from_str(&mcp::mejora_estado(e, &pedido).await.unwrap()).unwrap();
+    (ids(&v["para_agente"]), ids(&v["con_agente"]))
+}
+
+/// Un paso del agente, como lo anota el mod. Devuelve si valió.
+async fn paso(e: &Estado, id: i64, sesion: &str, paso: &str, texto: Option<&str>) -> bool {
+    let pedido = PedidoAgente { id, sesion: sesion.into(), paso: paso.into(), texto: texto.map(Into::into) };
+    let v: Value = serde_json::from_str(&mcp::agente(e, &pedido).await.unwrap()).unwrap();
+    v["ok"].as_bool().unwrap()
+}
+
+/// El guardián tomó la mejora, armó la copia y dejó el encargo.
+async fn dejar_lista(pool: &SqlitePool, id: i64, hace_horas: i64) {
+    let encargo = serde_json::json!({
+        "copia": format!("/tmp/memoria/trabajo/mejora-{id}"),
+        "cargo": format!("/tmp/memoria/trabajo/mejora-{id}-cargo"),
+        "pedido": "Arreglá la búsqueda.",
+    });
+    sqlx::query(
+        "update mejoras set estado = 'en_curso', fase = 'esperando_agente', fase_desde = ?2, empezada = ?3,
+                agente_sesion = null, agente_visto = null, encargo = ?4
+         where id = ?1",
+    )
+    .bind(id)
+    .bind(Utc::now())
+    .bind(Utc::now() - chrono::Duration::hours(hace_horas))
+    .bind(encargo.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn texto_de(pool: &SqlitePool, id: i64, columna: &str) -> Option<String> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select {columna} from mejoras where id = ?1")))
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -291,4 +340,133 @@ async fn los_avisos_llegan_al_chat_donde_se_acepto() {
     aceptar(&e, 2, "local_a").await.unwrap();
     assert_eq!(estado_de(&pool, 2).await, "aceptada");
     assert_eq!(avisos(&e, "local_a", &[]).await.1, Vec::<Value>::new());
+}
+
+#[tokio::test]
+async fn el_agente_lo_lanza_la_conversacion_donde_se_acepto() {
+    let base = comun::Base::nueva().await;
+    let pool = base.pool.clone();
+    let e = estado(pool.clone()).await;
+    empezar(&e, "local_a", "ACME", Some("Portal")).await;
+    empezar(&e, "local_b", "ACME", Some("Portal")).await;
+    empezar(&e, "local_f", "ACME", Some("Tienda")).await;
+    mcp::reportar(&e, &reporte("entregas del viernes", "local_a")).await.unwrap();
+    let dicho = aceptar(&e, 1, "local_a").await.unwrap();
+    assert!(dicho.contains("dentro de esta misma conversación"), "{dicho}");
+    // Hasta que el guardián no deja la copia lista, no hay nada que lanzar.
+    assert_eq!(agentes(&e, "local_a", &[]).await, (vec![], vec![]));
+    assert!(!paso(&e, 1, "local_a", "empezo", None).await);
+
+    dejar_lista(&pool, 1, 0).await;
+    let pedido = PedidoEstado { sesion: Some("local_a".into()), ..PedidoEstado::default() };
+    let v: Value = serde_json::from_str(&mcp::mejora_estado(&e, &pedido).await.unwrap()).unwrap();
+    // El encargo del guardián llega tal cual.
+    assert_eq!(v["para_agente"][0]["id"], 1);
+    assert_eq!(v["para_agente"][0]["encargo"]["copia"], "/tmp/memoria/trabajo/mejora-1");
+    assert_eq!(v["para_agente"][0]["encargo"]["pedido"], "Arreglá la búsqueda.");
+    assert_eq!(v["en_curso"], serde_json::json!([1]));
+    let cuenta = |id| PedidoEstado { id: Some(id), ..PedidoEstado::default() };
+    assert!(mcp::mejora_estado(&e, &cuenta(1)).await.unwrap().starts_with("Mejora 1: lista para el agente."));
+    // Otra conversación, aunque sea del mismo grupo, no la ve ni la puede tomar.
+    assert_eq!(agentes(&e, "local_b", &[]).await, (vec![], vec![]));
+    assert!(!paso(&e, 1, "local_b", "empezo", None).await);
+
+    // La toma la conversación donde se aceptó, una sola vez.
+    assert!(paso(&e, 1, "local_a", "empezo", None).await);
+    assert!(!paso(&e, 1, "local_a", "empezo", None).await);
+    assert_eq!(agentes(&e, "local_a", &[]).await, (vec![], vec![1]));
+    assert_eq!(texto_de(&pool, 1, "agente_sesion").await.as_deref(), Some("local_a"));
+    assert_eq!(texto_de(&pool, 1, "cast(lanzamientos as text)").await.as_deref(), Some("1"));
+    assert_eq!(
+        mcp::mejora_estado(&e, &cuenta(1)).await.unwrap(),
+        "Mejora 1: un agente la trabaja de fondo en una conversación de Claude desde hace 0 min."
+    );
+
+    // El mod avisa que el agente sigue andando: solo vale el de la conversación que lo lanzó.
+    let viejo = Utc::now() - chrono::Duration::minutes(5);
+    sqlx::query("update mejoras set agente_visto = ?1 where id = 1").bind(viejo).execute(&pool).await.unwrap();
+    let visto = || async { texto_de(&pool, 1, "agente_visto").await.unwrap() };
+    let antes = visto().await;
+    agentes(&e, "local_b", &[1]).await;
+    assert_eq!(visto().await, antes);
+    agentes(&e, "local_a", &[1]).await;
+    assert!(visto().await > antes, "el aviso de la conversación del agente renueva la marca");
+
+    // Solo esa conversación puede decir cómo terminó.
+    assert!(!paso(&e, 1, "local_b", "termino", Some("Listo.")).await);
+    assert!(paso(&e, 1, "local_a", "fallo", Some("  Se cortó la conversación.  ")).await);
+    assert_eq!(texto_de(&pool, 1, "fase").await.as_deref(), Some("agente_fallo"));
+    assert_eq!(texto_de(&pool, 1, "motivo").await.as_deref(), Some("Se cortó la conversación."));
+    assert_eq!(agentes(&e, "local_a", &[]).await, (vec![], vec![]));
+    assert!(mcp::mejora_estado(&e, &cuenta(1)).await.unwrap().contains("se va a lanzar de nuevo"));
+
+    // El guardián la deja lista otra vez; el segundo agente termina.
+    dejar_lista(&pool, 1, 0).await;
+    assert!(paso(&e, 1, "local_a", "empezo", None).await);
+    assert_eq!(texto_de(&pool, 1, "cast(lanzamientos as text)").await.as_deref(), Some("2"));
+    assert!(paso(&e, 1, "local_a", "termino", Some(" Bajé el piso de parecido de las notas. ")).await);
+    assert!(!paso(&e, 1, "local_a", "termino", Some("De nuevo.")).await);
+    assert_eq!(texto_de(&pool, 1, "fase").await.as_deref(), Some("agente_listo"));
+    assert_eq!(texto_de(&pool, 1, "informe").await.as_deref(), Some("Bajé el piso de parecido de las notas."));
+    assert!(mcp::mejora_estado(&e, &cuenta(1)).await.unwrap().contains("el agente terminó"));
+    assert_eq!(agentes(&e, "local_a", &[]).await, (vec![], vec![]));
+
+    // Un paso que no existe, o de una conversación desconocida, es un error de uso.
+    for (sesion, que) in [("local_a", "otro"), ("local_nadie", "empezo")] {
+        let pedido = PedidoAgente { id: 1, sesion: sesion.into(), paso: que.into(), texto: None };
+        assert!(matches!(mcp::agente(&e, &pedido).await, Err(Error::Uso(_))), "{sesion} {que}");
+    }
+
+    // Si no se pudo y el usuario la acepta de nuevo, arranca limpia.
+    sqlx::query("update mejoras set estado = 'fallida', fase = null, terminada = ?1 where id = 1")
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+    aceptar(&e, 1, "local_a").await.unwrap();
+    for columna in ["fase", "encargo", "informe", "agente_sesion", "agente_visto"] {
+        assert_eq!(texto_de(&pool, 1, columna).await, None, "{columna}");
+    }
+    assert_eq!(texto_de(&pool, 1, "cast(lanzamientos as text)").await.as_deref(), Some("0"));
+}
+
+#[tokio::test]
+async fn una_mejora_sin_su_conversacion_la_toma_otra_del_grupo() {
+    let base = comun::Base::nueva().await;
+    let pool = base.pool.clone();
+    let e = estado(pool.clone()).await;
+    empezar(&e, "local_a", "ACME", Some("Portal")).await;
+    empezar(&e, "local_b", "ACME", Some("Portal")).await;
+    empezar(&e, "local_f", "ACME", Some("Tienda")).await;
+    for buscado in ["entregas del viernes", "paginación de los listados", "permisos de los operadores"] {
+        mcp::reportar(&e, &reporte(buscado, "local_a")).await.unwrap();
+    }
+    for id in 1..=3 {
+        aceptar(&e, id, "local_a").await.unwrap();
+    }
+
+    // La conversación donde se aceptó no volvió a abrirse en horas: la puede
+    // tomar otra del mismo grupo, y ninguna de otro.
+    dejar_lista(&pool, 1, 7).await;
+    assert_eq!(agentes(&e, "local_b", &[]).await.0, vec![1]);
+    assert_eq!(agentes(&e, "local_f", &[]).await.0, Vec::<i64>::new());
+    assert!(!paso(&e, 1, "local_f", "empezo", None).await);
+    assert!(paso(&e, 1, "local_b", "empezo", None).await);
+    assert_eq!(agentes(&e, "local_b", &[]).await, (vec![], vec![1]));
+    // Sigue apareciendo en curso donde se aceptó, que es donde va el aviso.
+    assert_eq!(avisos(&e, "local_a", &[]).await.0, vec![1, 2, 3]);
+
+    // Una que no quedó atada a ninguna conversación la toma cualquiera.
+    dejar_lista(&pool, 2, 0).await;
+    sqlx::query("update mejoras set conversacion = null where id = 2").execute(&pool).await.unwrap();
+    assert_eq!(agentes(&e, "local_f", &[]).await.0, vec![2]);
+    assert!(paso(&e, 2, "local_f", "empezo", None).await);
+
+    // Con dos agentes trabajando, la tercera espera su turno.
+    dejar_lista(&pool, 3, 0).await;
+    assert_eq!(agentes(&e, "local_a", &[]).await.0, Vec::<i64>::new());
+    assert!(!paso(&e, 3, "local_a", "empezo", None).await);
+    assert!(paso(&e, 2, "local_f", "termino", Some("Listo.")).await);
+    assert_eq!(agentes(&e, "local_a", &[]).await.0, vec![3]);
+    assert!(paso(&e, 3, "local_a", "empezo", None).await);
 }

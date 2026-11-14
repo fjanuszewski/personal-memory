@@ -1,7 +1,9 @@
 //! Mejoras (punto 4.8 del diseño): el reporte de una falla, la pregunta al
-//! usuario y lo que pasa después. El servicio solo lleva la cuenta; el trabajo
-//! (copia, agente, batería, instalación) lo hace el guardián, que es otro
-//! programa y mira esta misma tabla.
+//! usuario y lo que pasa después. El servicio solo lleva la cuenta y hace de
+//! buzón: el guardián (otro programa, que mira esta misma tabla) arma la
+//! copia del código, revisa, prueba, mide e instala; el agente que hace el
+//! cambio corre de fondo dentro de una conversación de Claude, lanzado por el
+//! mod, que se entera por acá de que hay una mejora lista.
 
 use std::fmt;
 use std::str::FromStr;
@@ -20,6 +22,10 @@ const LARGO_DETALLE: usize = 4000;
 /// Un aviso que nadie vio en su conversación pasa, después de este rato, a
 /// la próxima conversación del mismo grupo.
 const HORAS_PARA_EL_GRUPO: i64 = 6;
+/// Cuántos agentes pueden estar trabajando a la vez, entre todas las conversaciones.
+const AGENTES_A_LA_VEZ: i64 = 2;
+const LARGO_INFORME: usize = 4000;
+const LARGO_MOTIVO: usize = 600;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EstadoMejora {
@@ -76,11 +82,63 @@ impl FromStr for EstadoMejora {
     }
 }
 
+/// En qué parte del recorrido está una mejora en curso. La anotan el guardián
+/// y, por medio de [`agente`], el mod de la conversación donde corre el agente.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fase {
+    /// El guardián arma la copia del código.
+    Preparando,
+    /// Lista: espera que una conversación de Claude abierta lance al agente.
+    EsperandoAgente,
+    /// Un agente la trabaja, de fondo, en una conversación.
+    ConAgente,
+    /// El agente terminó: espera al guardián.
+    AgenteListo,
+    /// El agente no pudo terminar: el guardián decide si se lanza otro.
+    AgenteFallo,
+    /// El guardián revisa, compila, prueba, mide e instala.
+    Probando,
+}
+
+impl Fase {
+    const TODAS: [Self; 6] = [
+        Self::Preparando,
+        Self::EsperandoAgente,
+        Self::ConAgente,
+        Self::AgenteListo,
+        Self::AgenteFallo,
+        Self::Probando,
+    ];
+
+    #[must_use]
+    pub const fn clave(self) -> &'static str {
+        match self {
+            Self::Preparando => "preparando",
+            Self::EsperandoAgente => "esperando_agente",
+            Self::ConAgente => "con_agente",
+            Self::AgenteListo => "agente_listo",
+            Self::AgenteFallo => "agente_fallo",
+            Self::Probando => "probando",
+        }
+    }
+}
+
+impl FromStr for Fase {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::TODAS.into_iter().find(|f| f.clave() == s).ok_or_else(|| format!("fase de mejora desconocida: {s}"))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Mejora {
     pub id: i64,
     pub resumen: String,
     pub estado: EstadoMejora,
+    /// Solo mientras está en curso.
+    pub fase: Option<Fase>,
+    pub fase_desde: Option<DateTime<Utc>>,
     pub motivo: Option<String>,
     pub cambios: Option<String>,
     pub conversacion: Option<String>,
@@ -128,13 +186,16 @@ fn limpio(texto: Option<&str>) -> Option<&str> {
 }
 
 /// Las columnas de una mejora, en el orden en que se piden siempre.
-const COLUMNAS: &str = "id, resumen, estado, motivo, cambios, conversacion, ejemplo, creada, empezada, terminada";
+const COLUMNAS: &str =
+    "id, resumen, estado, fase, fase_desde, motivo, cambios, conversacion, ejemplo, creada, empezada, terminada";
 
 #[derive(sqlx::FromRow)]
 struct Fila {
     id: i64,
     resumen: String,
     estado: String,
+    fase: Option<String>,
+    fase_desde: Option<DateTime<Utc>>,
     motivo: Option<String>,
     cambios: Option<String>,
     conversacion: Option<String>,
@@ -151,6 +212,8 @@ impl From<Fila> for Mejora {
             id: f.id,
             resumen: f.resumen,
             estado: f.estado.parse().unwrap_or(EstadoMejora::Propuesta),
+            fase: f.fase.and_then(|fase| fase.parse().ok()),
+            fase_desde: f.fase_desde,
             motivo: f.motivo,
             cambios: f.cambios,
             conversacion: f.conversacion,
@@ -267,7 +330,9 @@ pub async fn aceptar(pool: &SqlitePool, id: i64, conversacion: Option<&str>) -> 
     let fila: Option<Fila> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "update mejoras set
            estado = 'aceptada', motivo = null, cambios = null, terminada = null, empezada = null,
-           avisada = 0, conversacion = coalesce(?2, conversacion)
+           avisada = 0, conversacion = coalesce(?2, conversacion),
+           fase = null, fase_desde = null, encargo = null, informe = null, desde_version = null,
+           agente_sesion = null, agente_visto = null, lanzamientos = 0
          where id = ?1 and estado in ('propuesta', 'rechazada', 'fallida')
          returning {COLUMNAS}"
     )))
@@ -305,19 +370,60 @@ pub async fn rechazar(pool: &SqlitePool, id: i64, motivo: Option<&str>) -> Resul
     }
 }
 
+/// Una mejora lista para que una conversación lance su agente.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Encargo {
+    pub id: i64,
+    /// Lo que dejó el guardián para el mod (la carpeta de la copia, el
+    /// `cargo` de la mejora y el pedido). El servicio lo pasa tal cual.
+    pub encargo: Value,
+}
+
 /// Lo que el mod tiene que saber de una conversación: qué mejoras suyas
-/// siguen andando y cuáles terminaron sin que se haya avisado.
+/// siguen andando, cuáles terminaron sin que se haya avisado, cuáles esperan
+/// que lance un agente y cuáles tienen su agente corriendo en ella.
 #[derive(Clone, Debug, Default)]
 pub struct Avisos {
     pub en_curso: Vec<Mejora>,
     pub terminadas: Vec<Mejora>,
+    pub para_agente: Vec<Encargo>,
+    pub con_agente: Vec<i64>,
 }
 
-/// Marca como avisadas las mejoras de `vistos` (el mod ya las mostró) y
-/// devuelve lo pendiente para la conversación `sesion`. Un aviso que quedó
-/// sin mostrar en una conversación que no volvió a abrirse aparece, pasadas
-/// unas horas, en otra del mismo grupo.
-pub async fn avisos(pool: &SqlitePool, sesion: &str, vistos: &[i64]) -> Resultado<Avisos> {
+/// La conversación `sesion` como la conoce el servicio, con su grupo.
+async fn esta_conversacion<'e, E>(conexion: E, sesion: &str) -> Resultado<Option<(String, Option<i64>)>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    Ok(sqlx::query_as("select id, grupo_id from conversaciones where id = ?1 or transcripcion = ?1 limit 1")
+        .bind(sesion.trim())
+        .fetch_optional(conexion)
+        .await?)
+}
+
+/// A qué mejoras les puede lanzar el agente una conversación: a las que se
+/// aceptaron en ella y a las que no tienen conversación; y, si la suya no
+/// volvió a abrirse en unas horas, a las de otra conversación de su grupo.
+const PUEDE_LANZAR: &str = "m.estado = 'en_curso' and m.fase = 'esperando_agente' and m.encargo is not null
+     and (m.conversacion is null or m.conversacion = ?1
+          or (m.empezada < ?2
+              and exists (select 1 from conversaciones c where c.id = m.conversacion and c.grupo_id is ?3)))";
+
+async fn agentes_trabajando<'e, E>(conexion: E) -> Resultado<i64>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    Ok(sqlx::query_scalar("select count(*) from mejoras where estado = 'en_curso' and fase = 'con_agente'")
+        .fetch_one(conexion)
+        .await?)
+}
+
+/// Marca como avisadas las mejoras de `vistos` (el mod ya las mostró), anota
+/// que los agentes de `agentes` siguen andando en esta conversación y
+/// devuelve lo pendiente para ella. Un aviso que quedó sin mostrar en una
+/// conversación que no volvió a abrirse aparece, pasadas unas horas, en otra
+/// del mismo grupo.
+pub async fn avisos(pool: &SqlitePool, sesion: &str, vistos: &[i64], agentes: &[i64]) -> Resultado<Avisos> {
     if !vistos.is_empty() {
         sqlx::query(
             "update mejoras set avisada = 1
@@ -327,23 +433,38 @@ pub async fn avisos(pool: &SqlitePool, sesion: &str, vistos: &[i64]) -> Resultad
         .execute(pool)
         .await?;
     }
+    let Some((conversacion, grupo)) = esta_conversacion(pool, sesion).await? else {
+        return Ok(Avisos::default());
+    };
+    let ahora = base::ahora();
+    if !agentes.is_empty() {
+        sqlx::query(
+            "update mejoras set agente_visto = ?3
+             where id in (select value from json_each(?1))
+               and estado = 'en_curso' and fase = 'con_agente' and agente_sesion = ?2",
+        )
+        .bind(base::a_json(agentes))
+        .bind(&conversacion)
+        .bind(ahora)
+        .execute(pool)
+        .await?;
+    }
+    let hace_horas = ahora - Duration::hours(HORAS_PARA_EL_GRUPO);
     let filas: Vec<Fila> = sqlx::query_as(
-        "with esta as (
-           select id, grupo_id from conversaciones where id = ?1 or transcripcion = ?1 limit 1
-         )
-         select m.id, m.resumen, m.estado, m.motivo, m.cambios, m.conversacion, m.ejemplo,
+        "select m.id, m.resumen, m.estado, m.fase, m.fase_desde, m.motivo, m.cambios, m.conversacion, m.ejemplo,
                 m.creada, m.empezada, m.terminada
-         from mejoras m, esta
-         where (m.estado in ('aceptada', 'en_curso') and m.conversacion = esta.id)
+         from mejoras m
+         where (m.estado in ('aceptada', 'en_curso') and m.conversacion = ?1)
             or (m.estado in ('instalada', 'fallida') and m.avisada = 0
-                and (m.conversacion = esta.id
+                and (m.conversacion = ?1
                      or (m.terminada < ?2
                          and exists (select 1 from conversaciones c
-                                     where c.id = m.conversacion and c.grupo_id = esta.grupo_id))))
+                                     where c.id = m.conversacion and c.grupo_id is ?3))))
          order by m.id",
     )
-    .bind(sesion.trim())
-    .bind(base::ahora() - Duration::hours(HORAS_PARA_EL_GRUPO))
+    .bind(&conversacion)
+    .bind(hace_horas)
+    .bind(grupo)
     .fetch_all(pool)
     .await?;
     let mut avisos = Avisos::default();
@@ -354,7 +475,105 @@ pub async fn avisos(pool: &SqlitePool, sesion: &str, vistos: &[i64]) -> Resultad
             avisos.en_curso.push(mejora);
         }
     }
+    avisos.con_agente = sqlx::query_scalar(
+        "select id from mejoras where estado = 'en_curso' and fase = 'con_agente' and agente_sesion = ?1 order by id",
+    )
+    .bind(&conversacion)
+    .fetch_all(pool)
+    .await?;
+    let libres = usize::try_from(AGENTES_A_LA_VEZ - agentes_trabajando(pool).await?).unwrap_or(0);
+    if libres > 0 {
+        let listas: Vec<(i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "select m.id, m.encargo from mejoras m where {PUEDE_LANZAR} order by m.id"
+        )))
+        .bind(&conversacion)
+        .bind(hace_horas)
+        .bind(grupo)
+        .fetch_all(pool)
+        .await?;
+        avisos.para_agente = listas
+            .into_iter()
+            .filter_map(|(id, encargo)| Some(Encargo { id, encargo: serde_json::from_str(&encargo).ok()? }))
+            .take(libres)
+            .collect();
+    }
     Ok(avisos)
+}
+
+/// Lo que el mod anota del agente de una mejora.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Paso {
+    /// La conversación toma la mejora: va a lanzar su agente.
+    Empezo,
+    /// El agente terminó; `informe` es lo último que dijo.
+    Termino { informe: String },
+    /// El agente no arrancó o no pudo terminar.
+    Fallo { motivo: String },
+}
+
+fn recortar(texto: &str, largo: usize) -> String {
+    let texto = texto.trim();
+    if texto.chars().count() <= largo {
+        return texto.to_owned();
+    }
+    format!("{}…", texto.chars().take(largo).collect::<String>().trim_end())
+}
+
+/// Anota un paso del agente de la mejora `id`, que corre en la conversación
+/// `sesion`. Devuelve si el paso valió: una mejora la toma una sola
+/// conversación, y solo esa puede decir que su agente terminó o falló.
+pub async fn agente(pool: &SqlitePool, id: i64, sesion: &str, paso: &Paso) -> Resultado<bool> {
+    let mut tx = base::escribir(pool).await?;
+    let Some((conversacion, grupo)) = esta_conversacion(&mut *tx, sesion).await? else {
+        return uso("No conozco esa conversación: registrala primero con memoria_contexto.");
+    };
+    let ahora = base::ahora();
+    let cambiadas = match paso {
+        Paso::Empezo => {
+            if agentes_trabajando(&mut *tx).await? >= AGENTES_A_LA_VEZ {
+                return Ok(false);
+            }
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "update mejoras as m set
+                   fase = 'con_agente', fase_desde = ?5, agente_sesion = ?1, agente_visto = ?5,
+                   lanzamientos = lanzamientos + 1
+                 where m.id = ?4 and {PUEDE_LANZAR}"
+            )))
+            .bind(&conversacion)
+            .bind(ahora - Duration::hours(HORAS_PARA_EL_GRUPO))
+            .bind(grupo)
+            .bind(id)
+            .bind(ahora)
+            .execute(&mut *tx)
+            .await?
+        }
+        Paso::Termino { informe } => {
+            sqlx::query(
+                "update mejoras set fase = 'agente_listo', fase_desde = ?3, agente_visto = ?3, informe = ?4
+                 where id = ?1 and estado = 'en_curso' and fase = 'con_agente' and agente_sesion = ?2",
+            )
+            .bind(id)
+            .bind(&conversacion)
+            .bind(ahora)
+            .bind(recortar(informe, LARGO_INFORME))
+            .execute(&mut *tx)
+            .await?
+        }
+        Paso::Fallo { motivo } => {
+            sqlx::query(
+                "update mejoras set fase = 'agente_fallo', fase_desde = ?3, motivo = ?4
+                 where id = ?1 and estado = 'en_curso' and fase = 'con_agente' and agente_sesion = ?2",
+            )
+            .bind(id)
+            .bind(&conversacion)
+            .bind(ahora)
+            .bind(recortar(motivo, LARGO_MOTIVO))
+            .execute(&mut *tx)
+            .await?
+        }
+    };
+    tx.commit().await?;
+    Ok(cambiadas.rows_affected() == 1)
 }
 
 #[cfg(test)]
@@ -369,5 +588,19 @@ mod pruebas {
         assert!("otra".parse::<EstadoMejora>().is_err());
         assert_eq!(EstadoMejora::EnCurso.to_string(), "en curso");
         assert!(EstadoMejora::Fallida.terminada() && !EstadoMejora::Aceptada.terminada());
+    }
+
+    #[test]
+    fn lee_y_escribe_las_fases() {
+        for fase in Fase::TODAS {
+            assert_eq!(fase.clave().parse::<Fase>().unwrap(), fase);
+        }
+        assert!("otra".parse::<Fase>().is_err());
+    }
+
+    #[test]
+    fn recorta_lo_que_dice_el_agente() {
+        assert_eq!(recortar("  Bajé el piso.  ", 40), "Bajé el piso.");
+        assert_eq!(recortar("uno dos tres cuatro", 8), "uno dos…");
     }
 }

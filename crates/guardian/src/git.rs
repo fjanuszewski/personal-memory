@@ -64,13 +64,25 @@ pub fn compilados_base(cfg: &Config) -> PathBuf {
     cfg.trabajo().join("compilado-base")
 }
 
+/// Donde va la copia de trabajo de una mejora.
+#[must_use]
+pub fn copia_de(cfg: &Config, id: i64) -> PathBuf {
+    cfg.trabajo().join(format!("mejora-{id}"))
+}
+
+/// La rama donde queda el cambio de una mejora, en cada intento.
+#[must_use]
+pub fn rama_de(id: i64, intento: i32) -> String {
+    format!("mejora-{id}-{intento}")
+}
+
 /// Arma la copia de trabajo de una mejora, partiendo de `base`. Si había una
-/// de un intento anterior, la reemplaza.
+/// de un intento anterior (o de un agente que no terminó), la reemplaza.
 pub async fn copia_nueva(cfg: &Config, id: i64, intento: i32, base: &str) -> anyhow::Result<(PathBuf, String)> {
-    let dir = cfg.trabajo().join(format!("mejora-{id}"));
+    let dir = copia_de(cfg, id);
     quitar_copia(cfg, &dir).await;
     std::fs::create_dir_all(cfg.trabajo())?;
-    let rama = format!("mejora-{id}-{intento}");
+    let rama = rama_de(id, intento);
     git(cfg, &cfg.repo, &["worktree", "add", "--force", "-B", &rama, &dir.display().to_string(), base]).await?;
     // En este disco la copia es instantánea y no ocupa lugar hasta que algo cambia.
     let (semilla, compilados) = (compilados_base(cfg), compilados_de(&dir));
@@ -99,6 +111,13 @@ pub async fn cambios(cfg: &Config, dir: &Path) -> anyhow::Result<Vec<Cambio>> {
     let salida =
         orden::exigir(Path::new("git"), &["status", "--porcelain=v1", "-uall"], dir, &cfg.entorno(), LIMITE).await?;
     Ok(leer_cambios(&salida.salida))
+}
+
+/// Deja la copia como la dejó el agente, con sus cambios sin guardar. Hace
+/// falta si el guardián se cortó después de guardarlos: al retomar, los
+/// revisa de nuevo desde el principio. Si no había nada guardado, no cambia nada.
+pub async fn deshacer_guardado(cfg: &Config, dir: &Path, base: &str) -> anyhow::Result<()> {
+    git(cfg, dir, &["reset", "--mixed", "--quiet", base]).await.map(drop)
 }
 
 /// Guarda en la rama de la mejora todo lo que cambió. Devuelve el commit.

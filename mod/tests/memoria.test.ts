@@ -1,7 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, PromptComposeInput, PromptComposeResult, PromptSubmitInput } from 'claude-code'
 
+import { aEncargo, enRegla, normalizar, revisar } from '../hooks/agente'
 import { grupoDelResumen, provisorio } from '../hooks/grupos'
+import type { AgenteLanzado } from '../types'
 
 type Llamada = { server: string; tool: string; args: Record<string, unknown> }
 
@@ -52,7 +54,17 @@ type Mundo = {
 type Mejoras = {
   enCurso: number[]
   avisos: { id: number; instalada: boolean; texto: string; buscado: string | null }[]
+  /** Las que el guardián dejó listas para que esta conversación lance su agente. */
+  paraAgente?: { id: number; encargo: { copia: string; cargo: string; pedido: string } }[]
+  /** Las que, para el servicio, tienen su agente corriendo en esta conversación. */
+  conAgente?: number[]
+  /** Cuántas veces falla el servicio al anotar un paso del agente. */
+  fallasAlAnotar?: number
+  /** Si Claude se niega a lanzar al agente, con qué motivo. */
+  noLanza?: string
 }
+
+type Lanzado = { prompt: string; description?: string; subagentType?: string; cwd?: string }
 
 type Visto = {
   /** Lo que se le pidió a la app y a la memoria. */
@@ -63,6 +75,16 @@ type Visto = {
   avisos: string[]
   /** Los mensajes que el mod le mandó a Claude para que retome. */
   retomados: string[]
+  /** Los tipos de agente que el mod declaró. */
+  tipos: Record<string, unknown>[]
+  /** Los agentes que el mod lanzó. */
+  lanzados: Lanzado[]
+  /** Los agentes que la app dice tener, con su tipo, su tarea y cómo están. */
+  enLaApp: { id: string; type: string; status: string; description: string }[]
+  /** Las herramientas que llegaron a correr, como quedaron después de pasar por el mod. */
+  corridas: Record<string, unknown>[]
+  /** Los permisos que el mod no decidió y le dejó a la app: de quién y para qué herramienta. */
+  consultados: string[]
 }
 
 // Un mensaje con este texto no entra (como si otro gancho lo rechazara).
@@ -70,7 +92,17 @@ const RECHAZADO = 'rechazado'
 
 // La app (sus sesiones), el servicio memoria y el motor, con lo que se les pidió.
 function mundo(on: On, o: Mundo = {}): Visto {
-  const visto: Visto = { llamadas: [], adjuntos: [], avisos: [], retomados: [] }
+  const visto: Visto = {
+    llamadas: [],
+    adjuntos: [],
+    avisos: [],
+    retomados: [],
+    tipos: [],
+    lanzados: [],
+    enLaApp: [],
+    corridas: [],
+    consultados: [],
+  }
   let fallas = o.fallasMemoria ?? 0
   let fallasApp = o.fallasApp ?? 0
   mock.env(on, o.sinApp ? {} : { CLAUDE_CODE_HOST_SESSION_ID: 'local_1' })
@@ -81,9 +113,44 @@ function mundo(on: On, o: Mundo = {}): Visto {
   on('session.attach', (_, e) => ({ clientId: e.clientId }))
   on('session.compact', (_, e) => ({ messages: e.messages }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
-  on('tool.call', (_, e) =>
-    e.tool === 'mcp__memoria__memoria_mejorar' ? { result: 'Mejora aceptada.' } : { deny: 'sin herramienta' },
-  )
+  on('tool.call', (_, e) => {
+    if (e.tool === 'mcp__memoria__memoria_mejorar') return { result: 'Mejora aceptada.' }
+    if (!['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'].includes(e.tool)) return { deny: 'sin herramienta' }
+    visto.corridas.push(e as unknown as Record<string, unknown>)
+
+    return { result: 'hecho' }
+  })
+  // Lo que el mod no decide llega hasta la app, que acá deja pasar todo.
+  on('tool.check', (_, e) => {
+    visto.consultados.push(`${e.agentId ?? 'la conversación'}: ${e.tool}`)
+
+    return { decision: 'allow' as const }
+  })
+  on('agent.register', (_, e) => {
+    visto.tipos.push(e as unknown as Record<string, unknown>)
+
+    return { value: { agent: `memoria:${e.name}` } }
+  })
+  on('agent.offer', () => ({ isOffered: true }))
+  on('agent.list', () => ({ value: visto.enLaApp as never }))
+  // Lo que lanza un mod llega acá como lo recibe la herramienta de agentes
+  // de Claude. El id lo pone la app de verdad: en una prueba no vuelve con
+  // la respuesta, y el mod lo encuentra en la lista de agentes.
+  on('agent.spawn', (_, e) => {
+    const noLanza = o.mejoras?.noLanza
+    if (noLanza !== undefined) return { deny: noLanza }
+    const pedido = e as unknown as { prompt: string; description: string; subagent_type: string; cwd?: string }
+    visto.lanzados.push({
+      prompt: pedido.prompt,
+      description: pedido.description,
+      subagentType: pedido.subagent_type,
+      cwd: pedido.cwd,
+    })
+    const agentId = `a${visto.lanzados.length}`
+    visto.enLaApp.push({ id: agentId, type: pedido.subagent_type, status: 'running', description: pedido.description })
+
+    return { model: 'inherit', agentId }
+  })
   // La fila la guarda el motor: acá solo se mira qué dejó el mod.
   on('session.append', (_, e, next) => {
     const [bloque] = e.message.content
@@ -141,7 +208,34 @@ function mundo(on: On, o: Mundo = {}): Visto {
       const vistos = (llamada.args.vistos as number[] | undefined) ?? []
       mejoras.avisos = mejoras.avisos.filter(a => !vistos.includes(a.id))
 
-      return texto(JSON.stringify({ en_curso: mejoras.enCurso, avisos: mejoras.avisos }))
+      return texto(
+        JSON.stringify({
+          en_curso: mejoras.enCurso,
+          avisos: mejoras.avisos,
+          para_agente: mejoras.paraAgente ?? [],
+          con_agente: mejoras.conAgente ?? [],
+        }),
+      )
+    }
+    if (llamada.server === 'memoria' && llamada.tool === 'memoria_mejora_agente') {
+      const mejoras = o.mejoras ?? { enCurso: [], avisos: [] }
+      if ((mejoras.fallasAlAnotar ?? 0) > 0) {
+        mejoras.fallasAlAnotar = (mejoras.fallasAlAnotar ?? 0) - 1
+
+        return texto('memoria apagada', true)
+      }
+      const { id, paso } = llamada.args as { id: number; paso: string }
+      const lista = (mejoras.paraAgente ?? []).some(a => a.id === id)
+      const suya = (mejoras.conAgente ?? []).includes(id)
+      // Como el servicio: la toma quien llega primero, y solo esa conversación dice cómo terminó.
+      if (paso === 'empezo' && lista) {
+        mejoras.paraAgente = (mejoras.paraAgente ?? []).filter(a => a.id !== id)
+        mejoras.conAgente = [...(mejoras.conAgente ?? []), id]
+      } else if (paso !== 'empezo' && suya) {
+        mejoras.conAgente = (mejoras.conAgente ?? []).filter(m => m !== id)
+      } else return texto(JSON.stringify({ ok: false }))
+
+      return texto(JSON.stringify({ ok: true }))
     }
 
     return texto('herramienta desconocida', true)
@@ -155,6 +249,9 @@ const registros = (v: Visto) =>
 const deLaApp = (v: Visto) => v.llamadas.filter(l => l.server === 'ccd_session_mgmt')
 const porMejoras = (v: Visto) =>
   v.llamadas.filter(l => l.server === 'memoria' && l.tool === 'memoria_mejora_estado')
+// Lo que el mod le anotó al servicio sobre sus agentes.
+const pasos = (v: Visto) =>
+  v.llamadas.filter(l => l.server === 'memoria' && l.tool === 'memoria_mejora_agente').map(l => l.args)
 
 // Lo que el motor le pasa al armar las instrucciones de un pedido.
 const PEDIDO: PromptComposeInput = {
@@ -533,3 +630,290 @@ test('el nombre provisorio y el que informa el servicio', () => {
   expect(provisorio(null, '/')).toBe('Otras › Sin grupo')
   expect(provisorio(null, '')).toBe('Otras › Sin grupo')
 })
+
+// ---------- el agente de mantenimiento ----------
+
+const COPIA = '/Users/ana/.memoria/trabajo/mejora-7'
+const CARGO = `${COPIA}-cargo`
+const PEDIDO_AGENTE = 'Sos el agente de mantenimiento…\n\n## El pedido\n\nMejora 7 de la memoria.'
+// La mejora 7, aceptada en esta conversación y con la copia ya armada por el guardián.
+const lista = (): Mejoras => ({
+  enCurso: [7],
+  avisos: [],
+  paraAgente: [{ id: 7, encargo: { copia: COPIA, cargo: CARGO, pedido: PEDIDO_AGENTE } }],
+})
+const finDeAgente = (agentId: string, answer: string) => ({ ...finDeTurno, answer, agentId })
+
+test('cuando la copia está lista, lanza al agente en la conversación y avisa cuando termina', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-14T15:00:00.000Z') })
+  const visto = mundo(on, { mejoras: lista() })
+
+  await $.session.start(INICIO)
+  await clock.settle()
+
+  // Declaró el tipo de agente: solo seis herramientas, y sin preguntarle nunca al usuario.
+  expect(visto.tipos.length).toBe(1)
+  expect(visto.tipos[0]).toEqual(
+    expect.objectContaining({
+      name: 'mantenimiento',
+      tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'],
+      permissionMode: 'dontAsk',
+      omitClaudeMd: true,
+    }),
+  )
+  // Tomó la mejora y lanzó al agente en la copia, con el pedido que dejó el guardián.
+  expect(pasos(visto)).toEqual([{ id: 7, sesion: 'local_1', paso: 'empezo' }])
+  expect(visto.lanzados).toEqual([
+    {
+      prompt: PEDIDO_AGENTE,
+      description: 'Mejora 7 de la memoria',
+      subagentType: 'memoria:mantenimiento',
+      cwd: COPIA,
+    },
+  ])
+
+  // Mientras trabaja, cada vuelta avisa que sigue andando, y no lo lanza de nuevo.
+  await clock.advance(10_000)
+  expect(porMejoras(visto).at(-1)?.args).toEqual({ sesion: 'local_1', vistos: [], agentes: [7] })
+  expect(visto.lanzados.length).toBe(1)
+
+  // Termina: lo último que dijo va al servicio como informe.
+  await $.turn.complete(finDeAgente('a1', ' Bajé el piso de parecido de las notas. '))
+  expect(pasos(visto).at(-1)).toEqual({
+    id: 7,
+    sesion: 'local_1',
+    paso: 'termino',
+    texto: 'Bajé el piso de parecido de las notas.',
+  })
+  // Ya no avisa por él, y lo que ese agente quiera hacer después se le niega.
+  await clock.advance(10_000)
+  expect(porMejoras(visto).at(-1)?.args).toEqual({ sesion: 'local_1', vistos: [] })
+  const tarde = await $.tool.call({ tool: 'Read', file_path: 'README.md', agentId: 'a1' })
+  expect(tarde.deny).toContain('ya no está en marcha')
+})
+
+test('el agente solo lee la copia, solo edita el servicio y solo corre su cargo, sin que nadie pregunte', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-14T15:00:00.000Z') })
+  const visto = mundo(on, { mejoras: lista() })
+  await $.session.start(INICIO)
+  await clock.settle()
+  expect(visto.lanzados.length).toBe(1)
+
+  // Con cualquier nombre de herramienta, también una que el agente no tiene.
+  const pide = (tool: string, args: Record<string, unknown>): Promise<{ result?: unknown; deny?: string }> =>
+    $.tool.call({ tool, ...args, agentId: 'a1' } as never)
+  const ultima = () => visto.corridas.at(-1)
+
+  // Lee con rutas relativas a su copia; no sale de ella.
+  expect((await pide('Read', { file_path: 'crates/servicio/src/buscar.rs' })).result).toBe('hecho')
+  expect(ultima()?.file_path).toBe(`${COPIA}/crates/servicio/src/buscar.rs`)
+  for (const fuera of ['/etc/passwd', '../mejora-8/Cargo.toml', `${COPIA}/../../clave`, `${COPIA}-cargo`]) {
+    expect((await pide('Read', { file_path: fuera })).deny).toContain('dentro de la copia')
+  }
+  // Busca en la copia entera si no dice dónde, y nunca fuera.
+  await pide('Grep', { pattern: 'piso_notas' })
+  expect(ultima()?.path).toBe(COPIA)
+  await pide('Glob', { pattern: '**/*.rs', path: 'crates/servicio' })
+  expect(ultima()?.path).toBe(`${COPIA}/crates/servicio`)
+  expect((await pide('Glob', { pattern: '/Users/**/*.pem' })).deny).toContain('dentro de la copia')
+  expect((await pide('Glob', { pattern: '{../mejora-8,src}/**' })).deny).toContain('dentro de la copia')
+  expect((await pide('Grep', { pattern: 'clave', path: '/Users/ana' })).deny).toContain('dentro de la copia')
+
+  // Escribe solo en el servicio y en las migraciones.
+  expect((await pide('Edit', { file_path: 'crates/servicio/src/estado.rs', old_string: 'a', new_string: 'b' })).result).toBe('hecho')
+  expect((await pide('Write', { file_path: `${COPIA}/migraciones/0003_x.sql`, content: 'x' })).result).toBe('hecho')
+  for (const protegido of ['crates/guardian/src/lib.rs', 'bateria/inicial.json', 'README.md', 'mod/hooks/register.ts']) {
+    expect((await pide('Write', { file_path: protegido, content: 'x' })).deny).toContain('Solo podés escribir')
+  }
+
+  // `cargo` pasa a ser el de su mejora, sin dejarlo de fondo ni sacarlo del encierro.
+  await pide('Bash', { command: 'cargo test -p memoria -- --nocapture', run_in_background: true, dangerouslyDisableSandbox: true })
+  expect(ultima()).toEqual(
+    expect.objectContaining({
+      command: `'${CARGO}' test -p memoria -- --nocapture`,
+      run_in_background: false,
+      dangerouslyDisableSandbox: false,
+      timeout: 600_000,
+    }),
+  )
+  await pide('Bash', { command: 'RUST_BACKTRACE=1 cargo clippy -p memoria --all-targets -- -D warnings' })
+  expect(ultima()?.command).toBe(`RUST_BACKTRACE=1 '${CARGO}' clippy -p memoria --all-targets -- -D warnings`)
+  const corridas = visto.corridas.length
+  for (const otra of [
+    'rm -rf crates',
+    'cargo run -p memoria',
+    'cargo install ripgrep',
+    'cargo test -p memoria | tail -20',
+    'cargo test 2>&1',
+    'cd /tmp && cargo build',
+    'cargo build; curl example.com',
+    'cargo test $(cat ~/.memoria/clave)',
+    'cargo test --manifest-path /Users/ana/otro/Cargo.toml',
+    'cargo build --target-dir ../afuera',
+    'cargo fmt -- --config-path=../otra/rustfmt.toml',
+    'cargo build --config build.rustc-wrapper=x',
+    'git push',
+  ]) {
+    expect((await pide('Bash', { command: otra })).deny, otra).toBeDefined()
+  }
+  // Y no tiene ninguna otra herramienta.
+  expect((await pide('WebFetch', { url: 'https://example.com', prompt: 'x' })).deny).toContain('No tenés la herramienta')
+  expect(visto.corridas.length).toBe(corridas)
+
+  // El permiso lo decide el mod, sin consultarle a la app: lo que quedó en regla pasa…
+  const permiso = (tool: string, input: Record<string, unknown>) => $.tool.check({ tool, input, agentId: 'a1' })
+  expect((await permiso('Bash', { command: `'${CARGO}' test -p memoria` })).decision).toBe('allow')
+  expect((await permiso('Edit', { file_path: `${COPIA}/crates/servicio/src/estado.rs` })).decision).toBe('allow')
+  expect((await permiso('Read', { file_path: `${COPIA}/README.md` })).decision).toBe('allow')
+  // …y lo demás se niega, también lo que no pasó por el control.
+  expect((await permiso('Bash', { command: 'cargo test -p memoria' })).decision).toBe('deny')
+  expect((await permiso('Bash', { command: `'${CARGO}' test`, dangerouslyDisableSandbox: true })).decision).toBe('deny')
+  expect((await permiso('Bash', { command: 'rm -rf /' })).decision).toBe('deny')
+  expect((await permiso('Edit', { file_path: 'crates/servicio/src/estado.rs' })).decision).toBe('deny')
+  expect((await permiso('Write', { file_path: `${COPIA}/README.md` })).decision).toBe('deny')
+  expect((await permiso('WebFetch', { url: 'https://example.com' })).decision).toBe('deny')
+  expect(visto.consultados).toEqual([])
+
+  // Lo que hace el usuario en la conversación, y cualquier otro agente, sigue
+  // como siempre: el mod no cambia nada ni decide ningún permiso.
+  visto.enLaApp.push({ id: 'otro', type: 'general-purpose', status: 'running', description: 'otra cosa' })
+  await $.tool.call({ tool: 'Bash', command: 'ls /tmp' })
+  expect(ultima()?.command).toBe('ls /tmp')
+  await $.tool.call({ tool: 'Read', file_path: '/etc/hosts', agentId: 'otro' })
+  expect(ultima()?.file_path).toBe('/etc/hosts')
+  expect(visto.consultados).toEqual(['la conversación: Bash', 'otro: Read'])
+})
+
+test('si Claude no deja lanzarlo, o el agente se corta, lo anota para que el guardián decida', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-14T15:00:00.000Z') })
+  const mejoras = { ...lista(), noLanza: 'no se pueden lanzar más agentes' }
+  const visto = mundo(on, { mejoras })
+  await $.session.start(INICIO)
+  await clock.settle()
+  expect(pasos(visto)).toEqual([
+    { id: 7, sesion: 'local_1', paso: 'empezo' },
+    {
+      id: 7,
+      sesion: 'local_1',
+      paso: 'fallo',
+      texto: 'Claude no dejó lanzar el agente: no se pueden lanzar más agentes',
+    },
+  ])
+
+  // El guardián deja la copia lista otra vez y ahora sí arranca; pero se corta.
+  delete (mejoras as Mejoras).noLanza
+  mejoras.paraAgente = lista().paraAgente
+  await clock.advance(10_000)
+  expect(visto.lanzados.length).toBe(1)
+  await $.turn.complete({ ...finDeAgente('a1', ''), reason: 'error' })
+  expect(pasos(visto).at(-1)).toEqual({
+    id: 7,
+    sesion: 'local_1',
+    paso: 'fallo',
+    texto: 'El agente se cortó por un error de Claude.',
+  })
+})
+
+test('si el guardián le saca la mejora, al agente se le niega todo y no se avisa nada por él', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-14T15:00:00.000Z') })
+  const mejoras = lista()
+  const visto = mundo(on, { mejoras })
+  await $.session.start(INICIO)
+  await clock.settle()
+  expect((await $.tool.call({ tool: 'Read', file_path: 'README.md', agentId: 'a1' })).result).toBe('hecho')
+
+  // Pasó demasiado tiempo: el guardián arma la copia de nuevo para otro agente.
+  mejoras.conAgente = []
+  await clock.advance(10_000)
+  const negada = await $.tool.call({ tool: 'Read', file_path: 'README.md', agentId: 'a1' })
+  expect(negada.deny).toContain('Esta tarea se canceló')
+  expect((await $.tool.check({ tool: 'Read', input: { file_path: `${COPIA}/README.md` }, agentId: 'a1' })).decision).toBe('deny')
+  const anotados = pasos(visto).length
+  await $.turn.complete(finDeAgente('a1', 'Terminé igual.'))
+  expect(pasos(visto).length).toBe(anotados)
+})
+
+test('si el servicio no responde justo cuando el agente termina, el informe sale en la vuelta siguiente', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-14T15:00:00.000Z') })
+  const mejoras = lista()
+  const visto = mundo(on, { mejoras })
+  await $.session.start(INICIO)
+  await clock.settle()
+  mejoras.fallasAlAnotar = 1
+  await $.turn.complete(finDeAgente('a1', 'Bajé el piso de parecido.'))
+  expect(pasos(visto).filter(p => p.paso === 'termino').length).toBe(1)
+  expect(mejoras.conAgente).toEqual([7])
+
+  await clock.advance(10_000)
+  expect(pasos(visto).filter(p => p.paso === 'termino').length).toBe(2)
+  expect(mejoras.conAgente).toEqual([])
+  // Y no insiste más.
+  await clock.advance(30_000)
+  expect(pasos(visto).filter(p => p.paso === 'termino').length).toBe(2)
+})
+
+test('si la app deja de tener al agente, lo anota como caído', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-14T15:00:00.000Z') })
+  const visto = mundo(on, { mejoras: lista() })
+  await $.session.start(INICIO)
+  await clock.settle()
+  const [agente] = visto.enLaApp
+  if (agente) agente.status = 'killed'
+  await clock.advance(10_000)
+  expect(pasos(visto).at(-1)).toEqual({
+    id: 7,
+    sesion: 'local_1',
+    paso: 'fallo',
+    texto: 'El agente se detuvo antes de terminar.',
+  })
+})
+
+test('Claude no ve al agente entre los que puede usar ni puede anotar por él', async ($, on) => {
+  const clock = mock.clock(on)
+  mundo(on)
+  await $.session.start(INICIO)
+  await clock.settle()
+  const oferta = { description: 'x', source: 'plugin', provider: { plugin: 'memoria', tier: 'user' as const } }
+  expect((await $.agent.offer({ agent: 'memoria:mantenimiento', ...oferta })).isOffered).toBe(false)
+  expect((await $.agent.offer({ agent: 'Explore', ...oferta })).isOffered).toBe(true)
+  const r = await $.tool.call({ tool: 'mcp__memoria__memoria_mejora_agente', id: 7, sesion: 'local_1', paso: 'termino' })
+  expect(r.deny).toContain('la usa sola la memoria')
+})
+
+test('las reglas del agente, sin la app', () => {
+  const a: AgenteLanzado = { mejora: 7, copia: COPIA, cargo: CARGO }
+  expect(normalizar('/a/b/../c/./d//e')).toBe('/a/c/d/e')
+  expect(normalizar('/../..')).toBe('/')
+
+  expect(revisar(a, 'Read', { file_path: './docs/../README.md' })).toEqual({ cambio: { file_path: `${COPIA}/README.md` } })
+  expect(revisar(a, 'Read', {})).toEqual({ deny: expect.any(String) })
+  // La carpeta del servicio sí; algo que solo empieza igual, no.
+  expect('cambio' in revisar(a, 'Write', { file_path: 'crates/servicio/Cargo.toml' })).toBe(true)
+  expect('deny' in revisar(a, 'Write', { file_path: 'crates/servicio-falso/x.rs' })).toBe(true)
+  expect('deny' in revisar(a, 'Write', { file_path: 'migraciones' })).toBe(true)
+  expect('deny' in revisar(a, 'Edit', { file_path: `${COPIA}-otra/crates/servicio/x.rs` })).toBe(true)
+  // Revisar dos veces da lo mismo.
+  const una = revisar(a, 'Bash', { command: 'cargo  fmt   -p memoria' })
+  expect(una).toEqual({ cambio: expect.objectContaining({ command: `'${CARGO}' fmt -p memoria` }) })
+  if ('cambio' in una) expect(revisar(a, 'Bash', una.cambio)).toEqual(una)
+  expect('deny' in revisar(a, 'Bash', { command: 'cargo' })).toBe(true)
+  expect('deny' in revisar(a, 'Bash', { command: "cargo test 'x y'" })).toBe(true)
+  expect('deny' in revisar(a, 'Bash', { command: 'cargo test\nrm -rf x' })).toBe(true)
+  // Una carpeta con comilla en el nombre no rompe la orden.
+  const rara = { ...a, cargo: "/Users/ana/mi 'memoria'/mejora-7-cargo" }
+  expect(revisar(rara, 'Bash', { command: 'cargo check' })).toEqual({
+    cambio: expect.objectContaining({ command: "'/Users/ana/mi '\\''memoria'\\''/mejora-7-cargo' check" }),
+  })
+  expect(enRegla(a, 'Bash', { command: `'${CARGO}' check`, run_in_background: true })).not.toBe(null)
+  expect(enRegla({ ...a, anulado: true }, 'Read', { file_path: `${COPIA}/README.md` })).toContain('se canceló')
+
+  expect(aEncargo({ id: 7, encargo: { copia: `${COPIA}/`, cargo: CARGO, pedido: ' Arreglá esto. ' } })).toEqual({
+    id: 7,
+    copia: COPIA,
+    cargo: CARGO,
+    pedido: 'Arreglá esto.',
+  })
+  expect(aEncargo({ id: 7, encargo: { copia: 'relativa', cargo: CARGO, pedido: 'x' } })).toBe(null)
+  expect(aEncargo({ id: 7 })).toBe(null)
+})
+

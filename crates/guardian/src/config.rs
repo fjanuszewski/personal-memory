@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::Context;
 
@@ -30,10 +29,6 @@ pub struct Config {
     pub servicio: String,
     /// Nombre del agente de launchd del servicio (`MEMORIA_ETIQUETA`).
     pub etiqueta: String,
-    /// El programa de Claude Code que hace de agente (`MEMORIA_AGENTE`).
-    pub agente: PathBuf,
-    /// Cuánto puede trabajar el agente en una mejora.
-    pub limite_agente: Duration,
     /// Dónde buscar `cargo`, `git` y demás (`PATH` para lo que se lanza).
     pub ruta: String,
     /// Cuántas mejoras se trabajan a la vez (la instalación es de a una).
@@ -50,7 +45,6 @@ pub struct Config {
 
 const SERVICIO: &str = "http://127.0.0.1:7337";
 const ETIQUETA: &str = "personal-memory.memoria";
-const LIMITE_AGENTE: Duration = Duration::from_mins(30);
 /// Lo que decide cómo se calculan las huellas (ver la configuración del servicio).
 const DE_LAS_HUELLAS: [&str; 5] =
     ["MEMORIA_HUELLAS", "MEMORIA_MODELO_HUELLAS", "MEMORIA_OLLAMA", "MEMORIA_HILOS", "MEMORIA_UMBRALES"];
@@ -71,29 +65,6 @@ fn leer_ajustes(archivo: &Path) -> HashMap<String, String> {
         .map(|(nombre, valor)| (nombre.trim().to_owned(), valor.trim().trim_matches('"').to_owned()))
         .filter(|(nombre, valor)| nombre.starts_with("MEMORIA_") && !valor.is_empty())
         .collect()
-}
-
-/// El Claude Code más nuevo que haya: el de la app suele estar más al día
-/// que el de la terminal.
-fn agente_por_defecto(casa: &Path) -> PathBuf {
-    let de_la_app = casa.join("Library/Application Support/Claude/claude-code");
-    let mut candidatos: Vec<(Vec<u32>, PathBuf)> = Vec::new();
-    for version in std::fs::read_dir(&de_la_app).into_iter().flatten().flatten() {
-        let numeros: Vec<u32> =
-            version.file_name().to_string_lossy().split('.').filter_map(|n| n.parse().ok()).collect();
-        for armado in std::fs::read_dir(version.path()).into_iter().flatten().flatten() {
-            let programa = armado.path().join("claude.app/Contents/MacOS/claude");
-            if programa.is_file() {
-                candidatos.push((numeros.clone(), programa));
-            }
-        }
-    }
-    candidatos.sort();
-    if let Some((_, programa)) = candidatos.pop() {
-        return programa;
-    }
-    let local = casa.join(".claude/local/claude");
-    if local.is_file() { local } else { PathBuf::from("claude") }
 }
 
 impl Config {
@@ -121,8 +92,6 @@ impl Config {
             servicio: var("MEMORIA_SERVICIO")
                 .map_or_else(|| SERVICIO.to_owned(), |s| s.trim_end_matches('/').to_owned()),
             etiqueta: var("MEMORIA_ETIQUETA").unwrap_or_else(|| ETIQUETA.to_owned()),
-            agente: var("MEMORIA_AGENTE").map_or_else(|| agente_por_defecto(&casa), PathBuf::from),
-            limite_agente: LIMITE_AGENTE,
             ruta: var("MEMORIA_RUTA").unwrap_or(ruta),
             a_la_vez: 2,
             puerto_pruebas: var("MEMORIA_PUERTO_PRUEBAS").and_then(|p| p.parse().ok()).unwrap_or(7400),
@@ -164,12 +133,6 @@ impl Config {
         self.dir.join("instalada")
     }
 
-    /// La llave para que el agente use Claude sin la app, si se guardó una.
-    #[must_use]
-    pub fn llave_agente(&self) -> PathBuf {
-        self.dir.join("agente.token")
-    }
-
     /// El entorno mínimo con que se lanza todo: nada de lo que tenga el
     /// guardián pasa sin querer a lo que corre.
     #[must_use]
@@ -182,5 +145,28 @@ impl Config {
             ("LANG", "es_AR.UTF-8".to_owned()),
             ("TMPDIR", std::env::temp_dir().display().to_string()),
         ]
+    }
+}
+
+#[cfg(test)]
+impl Config {
+    /// Una configuración para las pruebas, con todo dentro de `dir`.
+    pub(crate) fn de_prueba(dir: &Path) -> Self {
+        Self {
+            bd: dir.join("memoria.db"),
+            huellas: Vec::new(),
+            repo: dir.join("codigo"),
+            dir: dir.to_owned(),
+            registros: dir.join("registros"),
+            servicio: "http://127.0.0.1:9".into(),
+            etiqueta: "prueba".into(),
+            ruta: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin".into(),
+            a_la_vez: 1,
+            puerto_pruebas: 7400,
+            reinicio: None,
+            apagado: None,
+            casa: dir.to_owned(),
+            usuario: "prueba".into(),
+        }
     }
 }

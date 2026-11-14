@@ -1,6 +1,8 @@
 // Mejoras de la memoria (docs/diseno.md, 4.4 y 4.8): lo que el servicio le
 // cuenta al mod de una conversación y lo que el mod hace con eso. Sin `$`:
 // solo datos.
+import { aEncargo } from './agente'
+import type { Encargo } from './agente'
 
 /** Una mejora que terminó y todavía no se avisó en el chat. */
 export type Aviso = {
@@ -17,6 +19,10 @@ export type EstadoMejoras = {
   /** Las mejoras de esta conversación que siguen andando. */
   enCurso: number[]
   avisos: Aviso[]
+  /** Las mejoras que esperan que esta conversación lance su agente. */
+  paraAgente: Encargo[]
+  /** Las mejoras cuyo agente, para el servicio, corre en esta conversación. */
+  conAgente: number[]
 }
 
 const esNumero = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
@@ -25,10 +31,17 @@ const esNumero = (v: unknown): v is number => typeof v === 'number' && Number.is
 export function leerEstado(texto: string): EstadoMejoras {
   const crudo: unknown = JSON.parse(texto)
   if (typeof crudo !== 'object' || crudo === null) throw new Error('respuesta inesperada de la memoria')
-  const { en_curso: enCurso, avisos } = crudo as { en_curso?: unknown; avisos?: unknown }
+  const {
+    en_curso: enCurso,
+    avisos,
+    para_agente: paraAgente,
+    con_agente: conAgente,
+  } = crudo as { en_curso?: unknown; avisos?: unknown; para_agente?: unknown; con_agente?: unknown }
 
   return {
     enCurso: Array.isArray(enCurso) ? enCurso.filter(esNumero) : [],
+    paraAgente: (Array.isArray(paraAgente) ? paraAgente : []).flatMap((a: unknown) => aEncargo(a) ?? []),
+    conAgente: Array.isArray(conAgente) ? conAgente.filter(esNumero) : [],
     avisos: (Array.isArray(avisos) ? avisos : []).flatMap((a: unknown): Aviso[] => {
       if (typeof a !== 'object' || a === null) return []
       const { id, instalada, texto: linea, buscado } = a as Record<string, unknown>

@@ -30,12 +30,32 @@ export type Avisos = {
   mostrados: number[]
 }
 
+/** Un agente de mantenimiento lanzado desde esta conversación. */
+export type AgenteLanzado = {
+  /** El id de la mejora que trabaja. */
+  mejora: number
+  /** La carpeta de la copia del código: de ahí no sale. */
+  copia: string
+  /** El `cargo` de la mejora: lo único que puede correr. */
+  cargo: string
+  /** El guardián le sacó la mejora: desde acá se le niega todo. */
+  anulado?: true
+  /** Terminó, y todavía falta avisarle al servicio cómo. */
+  aviso?: { paso: 'termino' | 'fallo'; texto: string }
+}
+
+/** Los agentes de mantenimiento de esta conversación, por el id que les dio la app. */
+export type Agentes = {
+  lanzados: Record<string, AgenteLanzado>
+}
+
 declare module 'claude-code' {
   interface PluginState {
     memoria: {
       contexto: Shaped<Contexto | null>
       entrega: Shaped<Entrega>
       avisos: Shaped<Avisos>
+      agentes: Shaped<Agentes>
     }
   }
 }

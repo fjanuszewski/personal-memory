@@ -2,12 +2,13 @@
 //! `memoria_buscar` (por palabras y por significado), `memoria_guardar` (que
 //! une las repetidas), `memoria_reemplazar` y las de mejoras:
 //! `memoria_reportar`, `memoria_mejorar`, `memoria_rechazar` y
-//! `memoria_mejora_estado`.
+//! `memoria_mejora_estado`. `memoria_mejora_agente` no es para Claude: la usa
+//! el mod de la app para anotar cómo le va al agente que lanzó.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use chrono::{Local, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
@@ -20,7 +21,7 @@ use crate::error::{Error, Resultado, uso};
 use crate::estado::Estado;
 use crate::grupos::{self, Grupo, Registro};
 use crate::huellas::Uso;
-use crate::mejoras::{self, EstadoMejora, Mejora, Registrada, Reporte};
+use crate::mejoras::{self, EstadoMejora, Fase, Mejora, Paso, Registrada, Reporte};
 use crate::modelo::TipoNota;
 use crate::notas::{self, Guardado, NuevaNota};
 use crate::senales;
@@ -182,6 +183,22 @@ pub struct PedidoEstado {
     /// Con `sesion`: los ids de los avisos que el mod ya mostró.
     #[serde(default)]
     pub vistos: Vec<i64>,
+    /// Con `sesion`: los ids de las mejoras cuyo agente sigue andando en esa conversación.
+    #[serde(default)]
+    pub agentes: Vec<i64>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct PedidoAgente {
+    /// El id de la mejora.
+    pub id: i64,
+    /// El id de la conversación donde corre el agente.
+    pub sesion: String,
+    /// `empezo` (la conversación toma la mejora y va a lanzar al agente), `termino` o `fallo`.
+    pub paso: String,
+    /// Con `termino`: lo último que dijo el agente. Con `fallo`: por qué no pudo.
+    #[serde(default)]
+    pub texto: Option<String>,
 }
 
 fn limpio(texto: Option<&str>) -> Option<&str> {
@@ -422,8 +439,9 @@ pub async fn mejorar(e: &Estado, p: &PedidoMejorar) -> Resultado<String> {
     };
     let m = mejoras::aceptar(&e.pool, p.id, conversacion.as_deref()).await?;
     Ok(format!(
-        "Mejora {} aceptada. Un agente la va a trabajar de fondo (puede tardar hasta media hora) y el resultado va \
-         a aparecer en este chat. Seguí con lo que estabas.",
+        "Mejora {} aceptada. Un agente la va a trabajar de fondo dentro de esta misma conversación (puede tardar \
+         hasta media hora; si la conversación se cierra, sigue cuando se vuelva a abrir) y el resultado va a \
+         aparecer en este chat. Seguí con lo que estabas.",
         m.id
     ))
 }
@@ -450,7 +468,7 @@ fn aviso_de(m: &Mejora) -> String {
 pub async fn mejora_estado(e: &Estado, p: &PedidoEstado) -> Resultado<String> {
     if let Some(sesion) = limpio(p.sesion.as_deref()) {
         // Para el mod: en JSON, lo que sigue andando y lo que hay que avisar.
-        let avisos = mejoras::avisos(&e.pool, sesion, &p.vistos).await?;
+        let avisos = mejoras::avisos(&e.pool, sesion, &p.vistos, &p.agentes).await?;
         let terminadas: Vec<_> = avisos
             .terminadas
             .iter()
@@ -464,7 +482,16 @@ pub async fn mejora_estado(e: &Estado, p: &PedidoEstado) -> Resultado<String> {
             })
             .collect();
         let en_curso: Vec<i64> = avisos.en_curso.iter().map(|m| m.id).collect();
-        return Ok(json!({ "en_curso": en_curso, "avisos": terminadas }).to_string());
+        // Lo que esta conversación puede lanzar ahora, con el encargo que dejó el guardián.
+        let para_agente: Vec<_> =
+            avisos.para_agente.iter().map(|a| json!({ "id": a.id, "encargo": a.encargo })).collect();
+        return Ok(json!({
+            "en_curso": en_curso,
+            "avisos": terminadas,
+            "para_agente": para_agente,
+            "con_agente": avisos.con_agente,
+        })
+        .to_string());
     }
     let Some(id) = p.id else {
         return uso("Pasá el `id` de la mejora.");
@@ -476,8 +503,27 @@ pub async fn mejora_estado(e: &Estado, p: &PedidoEstado) -> Resultado<String> {
         EstadoMejora::Propuesta => format!("Mejora {id}: registrada; falta que el usuario diga si la quiere."),
         EstadoMejora::Aceptada => format!("Mejora {id}: aceptada; espera a que el agente la tome."),
         EstadoMejora::EnCurso => {
-            let minutos = m.empezada.map_or(0, |i| (chrono::Utc::now() - i).num_minutes());
-            format!("Mejora {id}: en curso desde hace {minutos} min.")
+            let minutos = |desde: Option<DateTime<Utc>>| desde.map_or(0, |i| (Utc::now() - i).num_minutes());
+            match m.fase {
+                Some(Fase::EsperandoAgente) => format!(
+                    "Mejora {id}: lista para el agente. Empieza cuando esté abierta la conversación de Claude donde \
+                     se aceptó."
+                ),
+                Some(Fase::ConAgente) => format!(
+                    "Mejora {id}: un agente la trabaja de fondo en una conversación de Claude desde hace {} min.",
+                    minutos(m.fase_desde)
+                ),
+                Some(Fase::AgenteFallo) => {
+                    format!("Mejora {id}: el agente no pudo terminar; se va a lanzar de nuevo.")
+                }
+                Some(Fase::AgenteListo | Fase::Probando) => format!(
+                    "Mejora {id}: el agente terminó; su cambio se está revisando, probando y midiendo antes de \
+                     instalarlo."
+                ),
+                Some(Fase::Preparando) | None => {
+                    format!("Mejora {id}: en curso desde hace {} min.", minutos(m.empezada))
+                }
+            }
         }
         EstadoMejora::Instalada => {
             format!("Mejora {id}: instalada. {}", m.cambios.as_deref().unwrap_or("No quedó anotado qué cambió."))
@@ -488,6 +534,20 @@ pub async fn mejora_estado(e: &Estado, p: &PedidoEstado) -> Resultado<String> {
         ),
         EstadoMejora::Rechazada => format!("Mejora {id}: el usuario la rechazó."),
     })
+}
+
+/// Para el mod: anota cómo le va al agente que lanzó. Responde en JSON si el
+/// paso valió.
+pub async fn agente(e: &Estado, p: &PedidoAgente) -> Resultado<String> {
+    let texto = || limpio(p.texto.as_deref()).unwrap_or_default().to_owned();
+    let paso = match p.paso.trim() {
+        "empezo" => Paso::Empezo,
+        "termino" => Paso::Termino { informe: texto() },
+        "fallo" => Paso::Fallo { motivo: texto() },
+        otro => return uso(format!("No conozco el paso «{otro}»: es `empezo`, `termino` o `fallo`.")),
+    };
+    let ok = mejoras::agente(&e.pool, p.id, &p.sesion, &paso).await?;
+    Ok(json!({ "ok": ok }).to_string())
 }
 
 #[derive(Clone)]
@@ -621,6 +681,16 @@ instaló (y qué cambió) o si no se pudo (y por qué).",
     )]
     async fn memoria_mejora_estado(&self, Parameters(p): Parameters<PedidoEstado>) -> CallToolResult {
         self.responder("memoria_mejora_estado", mejora_estado(&self.estado, &p).await).await
+    }
+
+    #[tool(
+        name = "memoria_mejora_agente",
+        description = "No es para Claude: la usa sola la app. Anota que el agente de una mejora de la memoria empezó, \
+terminó o no pudo, en la conversación donde corre.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn memoria_mejora_agente(&self, Parameters(p): Parameters<PedidoAgente>) -> CallToolResult {
+        self.responder("memoria_mejora_agente", agente(&self.estado, &p).await).await
     }
 }
 

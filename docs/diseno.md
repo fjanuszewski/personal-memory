@@ -238,6 +238,7 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
   2. Los registra en el servicio y recibe el resumen del grupo.
   3. Lo agrega como sección de las instrucciones de esa conversación, junto con las reglas de uso (abajo) y el id de sesión.
 - **Cambios a mitad de la conversación:** la app arma las instrucciones una sola vez por conversación (y de nuevo recién al resumirla). El grupo se revisa antes de cada mensaje. Si la conversación pasó a otro grupo del costado, el resumen llegó tarde o el mod se cargó con la conversación ya empezada, el mod se lo adjunta a Claude al próximo mensaje, venga de donde venga (del usuario, de otra conversación o un aviso de la app), una sola vez.
+- **El agente de cada mejora corre acá** (desde el 14/11/2026, ver 4.8): cuando el guardián deja lista la copia del código de una mejora aceptada en esta conversación, el mod lanza al agente de fondo (`$.agent.spawn`), le pone los límites (`tool.call`), decide él cada permiso sin que la app le pregunte al usuario (`tool.check`) y le anota al servicio cuándo empezó, que sigue andando y cómo terminó.
 - **Mejoras en curso:** mientras haya alguna lanzada desde esta conversación, el mod pregunta su estado cada 10 segundos. Cuando termina:
   - Pone una línea visible en el chat (`$.session.append`, como aviso): *"Memoria: mejora instalada, ahora encuentra sinónimos"* o *"No pude…; quedó como estaba"*.
   - Si se instaló, manda un mensaje corto para que Claude retome lo que había fallado (`$.prompt.submit`). Si Claude está en medio de un turno, el mensaje queda en fila.
@@ -317,10 +318,10 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
 4. **Aceptación** (`memoria_mejorar`): el servicio le pasa el pedido al guardián, que:
    1. Suma el ejemplo del reporte a la batería, antes de que el agente empiece.
    2. Crea una copia del código (`git worktree` en `~/.memoria/trabajo/mejora-<id>`) y una copia de la base para pruebas (`memoria_prueba_<id>`).
-   3. Lanza el agente: `claude -p` en esa copia, con instrucciones fijas más el pedido.
+   3. Deja el encargo para el agente, que corre dentro de una conversación de Claude, lanzado por el mod (al principio lo lanzaba el guardián con `claude -p` y una llave; ver «El agente corre dentro de Claude», más abajo).
       - **Permisos limitados:** leer y editar solo `crates/servicio/` y `migraciones/`, y compilar y probar.
-      - **Sin internet ni otras herramientas:** sin búsqueda web y sin servidores MCP (`--strict-mcp-config` sin ninguno). Internet solo para bajar librerías, si el usuario aceptó una mejora que las suma.
-      - **Límite de 30 minutos.**
+      - **Sin internet ni otras herramientas:** sin búsqueda web y sin servidores MCP. Internet solo para bajar librerías, si el usuario aceptó una mejora que las suma.
+      - **Límite de 45 minutos.**
    4. El agente hace el cambio y deja un resumen.
    5. El guardián compila, corre las pruebas y la batería contra la copia de la base, y compara. Se acepta solo si:
       - el puntaje no baja;
@@ -344,10 +345,26 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
 - **Batería.** Tiene dos partes: la inicial (`bateria/inicial.json`, con sus propias notas, que se cargan en la copia de la base) y la que crece con cada reporte (tabla `bateria`, sobre notas reales). Incluye preguntas que no tienen que traer nada. Lo esperado tiene que estar entre los 5 primeros resultados, buscando solo en notas.
 - **De dónde parte cada mejora.** Del commit del que salió lo instalado (`~/.memoria/instalada`), no de la rama principal. Si lo instalado tenía cambios sin guardar en git, no se hacen mejoras hasta guardarlos e instalar de nuevo.
 - **Vuelta atrás.** La base solo se restaura si el programa nuevo llegó a cambiar su estructura. La base que falló se renombra (`memoria_fallida_…`), no se borra.
-- **El agente necesita una llave propia.** La sesión de la app de Claude no sirve fuera de la app: hay que correr `instalacion/conectar-agente.sh` una vez.
-- **Sin internet** se cumple quitándole al agente las herramientas de red y los servidores MCP; no hay un encierro del sistema operativo. `cargo` podría bajar librerías, pero el guardián descarta cualquier cambio que las sume sin permiso.
+- **El agente no necesita ninguna llave** desde el 14/11/2026: corre dentro de la conversación de Claude (ver abajo). Antes había que sacarle una con `claude setup-token`.
+- **Sin internet** se cumple quitándole al agente las herramientas de red y los servidores MCP, y corriendo su `cargo` sin red; no hay un encierro del sistema operativo. Lo que el agente escribe en el servicio se ejecuta al probar (pruebas, pasos de compilación): por eso lo que decide qué se instala no es el agente sino el guardián, que revisa qué archivos cambiaron, prueba y mide.
 - **Señales.** Se guardan `busqueda`, `busqueda_vacia`, `lenta` y `error`. Quedaron sin hacer `resultado_no_usado` y `repetida`.
-- **Probado** con un ensayo completo (copia de la base, del código y del servicio) y un agente de mentira: una mejora buena se instala; una que rompe la batería, una que toca archivos protegidos y una sin cambios se descartan; una instalación que sale mal se deshace con base incluida; y dos a la vez se instalan en fila. Falta la corrida con el agente de verdad, que necesita la llave.
+- **Probado** con un ensayo completo (copia de la base, del código y del servicio) y un agente de mentira: una mejora buena se instala; una que rompe la batería, una que toca archivos protegidos y una sin cambios se descartan; una instalación que sale mal se deshace con base incluida; y dos a la vez se instalan en fila.
+
+**El agente corre dentro de Claude (14/11/2026).** La primera versión lanzaba al agente desde el guardián, con `claude -p` y una llave que el usuario tenía que sacar y pegar a mano. Era una mala experiencia para algo que se usa conversando con Claude, así que ahora:
+- **Tres tramos.** El guardián *prepara* (batería, copia del código, encargo), *espera* y, cuando el agente termina, *revisa, prueba, mide e instala*. Mientras espera no ocupa ningún lugar: los dos lugares del guardián son para preparar y para probar.
+- **Fases.** Mientras una mejora está `en_curso`, la columna `fase` dice dónde: `preparando`, `esperando_agente`, `con_agente`, `agente_listo`, `agente_fallo` o `probando` (migración `0002`). Al lado quedan el `encargo` (lo que el guardián le deja al mod: la carpeta de la copia, el `cargo` de la mejora y el pedido), el `informe` (lo último que dijo el agente), de qué versión partió la copia, en qué conversación corre el agente, su última señal y cuántos se lanzaron.
+- **El servicio hace de buzón.** `memoria_mejora_estado` le cuenta al mod qué mejoras puede lanzar esa conversación (`para_agente`) y cuáles tienen su agente en ella (`con_agente`); con `memoria_mejora_agente` el mod anota `empezo`, `termino` (con el informe) o `fallo` (con el motivo). Una mejora la toma una sola conversación, y hasta dos agentes trabajan a la vez.
+- **Quién la lanza.** La conversación donde se aceptó. Si no vuelve a abrirse en seis horas, otra del mismo grupo; una mejora que no quedó atada a ninguna conversación, cualquiera.
+- **Los límites los pone el mod**, que es quien ve cada cosa que el agente quiere hacer:
+  - El tipo de agente (`memoria:mantenimiento`) tiene solo seis herramientas (leer, buscar por nombre y por contenido, editar, escribir y la terminal), no ve las instrucciones personales del usuario y nunca le pregunta nada: lo que el mod no aprueba, se niega.
+  - Antes de cada llamada (`tool.call`): las rutas se resuelven dentro de la copia; leer y buscar, solo ahí; escribir, solo en `crates/servicio/` y `migraciones/`; y de la terminal solo pasa `cargo build|check|test|clippy|fmt` con opciones simples, cambiado por el `cargo` de la mejora.
+  - En el permiso (`tool.check`): se aprueba solo lo que ya quedó en esa forma; lo demás se niega. Así la app nunca le pide permiso al usuario por algo del agente.
+  - Lo que hace el usuario en la conversación, y cualquier otro agente, sigue de largo sin cambios.
+- **El `cargo` de la mejora** es un programita que deja el guardián al lado de la copia (fuera de ella, para que el agente no lo edite): entra a la copia, limpia el entorno (nada de la conversación de Claude pasa a lo que se compila o se prueba), compila en la carpeta de esa mejora y corre sin red, salvo que el usuario haya aceptado sumar librerías.
+- **Las reglas del agente siguen en el guardián** (`crates/guardian/instrucciones.md`): viajan al principio del pedido. El agente no las puede cambiar.
+- **Si el agente no termina.** El mod avisa cada 10 segundos qué agentes siguen andando. Si deja de avisar dos minutos (se cerró la conversación o la app), si el agente pasa de 45 minutos o si el mod anota que falló, el guardián arma la copia de nuevo y la mejora vuelve a esperar. Al tercer agente que no termina, queda sin instalar y se avisa el motivo. El silencio se mide con el reloj de la Mac despierta: una siesta de la máquina no cuenta.
+- **Si el guardián le saca la mejora a un agente que sigue vivo**, el mod se entera en la vuelta siguiente y desde ahí le niega todo, para que termine.
+- **Lo que cambia para el usuario:** no hay llave; el agente trabaja solo con la conversación abierta; y se ve entre las tareas de fondo de esa conversación.
 
 **Concurrencia:**
 - Hasta 2 agentes a la vez. La instalación se hace en fila.
@@ -361,7 +378,7 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
 - **Salud:** `GET /salud` en el servicio. El guardián lo usa después de cada instalación.
 - **Respaldos:** diarios, 14 días; además, uno antes de cada migración.
 - **Consumo:**
-  - Cada mejora es una sesión de Claude de fondo que usa el plan del usuario.
+  - Cada mejora es un agente de fondo dentro de una conversación de Claude, que usa el plan del usuario.
   - Lo nocturno y las huellas corren en la Mac, sin costo.
 - **Actualizar el guardián:** solo a mano, desde una conversación con el usuario. Nunca lo hace el agente.
 
@@ -384,6 +401,7 @@ personal-memory/
 - Todo queda en la Mac. El servicio escucha solo localmente y pide clave; la base es un archivo que solo puede leer su dueño.
 - La única vez que el servicio usa internet es para bajar el modelo de huellas, al instalar. Después corre sin conexión.
 - Lo único que sale es lo que ve el agente de mantenimiento al usar Claude: el código y el ejemplo del reporte, que puede incluir partes de notas.
+- No se guarda ninguna llave de Claude: el agente usa la sesión de la conversación donde corre.
 - Filtro de secretos antes de guardar notas y fragmentos.
 - Ningún agente borra datos: solo se descartan.
 
@@ -463,7 +481,7 @@ Se midieron cuatro opciones con las mismas notas y preguntas (las de la batería
 | 5. Después | La regla de grupos pasa al servicio (hecho en la 0.5); gancho de inicio para la terminal; preparar el paso a un servidor | Según se necesite |
 | 6. Estilo (propuesta) | Mensajes propios de los chats, WhatsApp y Slack; perfil por lugar e idioma; `memoria_estilo` | Claude redacta un mensaje de WhatsApp y un mail que suenan al usuario usando el perfil |
 
-Hechas: la 1 (12/11/2026) y la 2 (13/11/2026). La 3 está construida, instalada y ensayada con un agente de mentira (13/11/2026); falta verla correr con el agente de verdad. El 13/11/2026, además, la versión 0.4 sacó a Postgres y a Ollama de lo que hace falta para instalarla, y el 14/11/2026 la 0.5 sacó los nombres propios y dejó una regla de grupos general (4.12).
+Hechas: la 1 (12/11/2026) y la 2 (13/11/2026). La 3 está construida, instalada y ensayada con un agente de mentira (13/11/2026); desde el 14/11/2026 el agente corre dentro de la conversación de Claude, sin llave (4.8). El 13/11/2026, además, la versión 0.4 sacó a Postgres y a Ollama de lo que hace falta para instalarla, y el 14/11/2026 la 0.5 sacó los nombres propios y dejó una regla de grupos general (4.12).
 
 ## 6. Riesgos y preguntas abiertas
 

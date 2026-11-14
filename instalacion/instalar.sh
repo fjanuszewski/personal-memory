@@ -8,8 +8,8 @@
 # instalado sigue andando igual. Ahí quedan también los datos de cada uno, que
 # nunca pasan por el repositorio.
 #
-#   <carpeta>/bin/         los programas (servicio, guardián, y los comandos
-#                          para sacar la llave del agente y para desinstalar)
+#   <carpeta>/bin/         los programas (servicio y guardián) y el comando
+#                          para desinstalar
 #   <carpeta>/catalogo/    el mod, de donde lo lee Claude
 #   <carpeta>/codigo/      una copia propia del código de la versión instalada,
 #                          donde el guardián hace y guarda las mejoras
@@ -133,8 +133,15 @@ fi
 copiar "$REPO/target/release/memoria"
 copiar "$REPO/target/release/memoria-guardian"
 # Lo que hace falta después de instalar queda acá, para no depender del repositorio.
-copiar "$REPO/instalacion/conectar-agente.sh"
 copiar "$REPO/instalacion/desinstalar.sh"
+# El agente de mejoras ya no usa ninguna llave (corre dentro de la conversación
+# de Claude): lo que haya dejado una versión anterior se saca.
+if [[ -f "$DIR/agente.token" ]]; then
+  rm -f "$DIR/agente.token"
+  echo "Saqué la llave del agente que había guardado una versión anterior: ya no se usa."
+  echo "  Si querés anularla del todo, se hace desde tu cuenta de Claude."
+fi
+rm -f "$DIR/bin/conectar-agente.sh"
 
 paso "Ajustes"
 # Lo que se haya pedido al llamar al instalador queda anotado, y vale también
@@ -243,7 +250,5 @@ paso "Agente de arranque del guardián"
 arrancar "$GUARDIAN"
 
 print -P "%F{green}✔%f Memoria instalada en $DIR. Las conversaciones nuevas ya la tienen."
-if [[ ! -f "$DIR/agente.token" ]]; then
-  echo "Para las mejoras automáticas falta una cosa, una sola vez: darle una llave al agente de mejoras."
-  echo "  Correr $DIR/bin/conectar-agente.sh en la app Terminal."
-fi
+echo "Las mejoras automáticas no piden nada más: el agente que las hace trabaja de fondo"
+echo "  dentro de la conversación de Claude donde las aceptes, con tu sesión de siempre."

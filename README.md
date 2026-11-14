@@ -2,7 +2,7 @@
 
 Memoria a largo plazo por grupo (empresa › proyecto, como ACME › Portal) para las conversaciones con Claude. Corre de fondo en tu Mac, guarda decisiones, errores resueltos, cambios, acuerdos con el cliente y pendientes en un archivo propio, y Claude la consulta y la completa sola en cada conversación. El diseño completo está en [docs/diseno.md](docs/diseno.md).
 
-**Estado:** etapa 3 (mejoras), versión 0.5. Busca por palabras y por significado, une las notas repetidas, lleva la cuenta de qué nota reemplazó a cuál, lee lo conversado y, cuando falla, se puede arreglar sola si el usuario acepta. El recorrido del historial viejo (etapa 4) todavía no está.
+**Estado:** etapa 3 (mejoras), versión 0.6. Busca por palabras y por significado, une las notas repetidas, lleva la cuenta de qué nota reemplazó a cuál, lee lo conversado y, cuando falla, se puede arreglar sola si el usuario acepta. El recorrido del historial viejo (etapa 4) todavía no está.
 
 **No necesita nada instalado aparte.** Desde la versión 0.4 la base es un solo archivo (`~/.memoria/memoria.db`, SQLite) y el modelo que calcula las huellas de significado corre dentro del servicio. Ya no hacen falta Postgres ni Ollama (Ollama queda como opción para quien lo prefiera).
 
@@ -23,7 +23,7 @@ En este repositorio hay solo código. Lo que anda en la máquina, y todos los da
 
 | En la carpeta de instalación | Qué es |
 |---|---|
-| `bin/` | Los programas: el servicio, el guardián, y los comandos para sacar la llave del agente y para desinstalar. |
+| `bin/` | Los programas (el servicio y el guardián) y el comando para desinstalar. |
 | `catalogo/` | El mod, de donde lo lee Claude. |
 | `codigo/` | Una copia propia del código de la versión instalada. Ahí el guardián arma y guarda las mejoras automáticas. |
 | `memoria.db` | La base. Al lado quedan la clave, los ajustes, los respaldos (`respaldos/`) y el modelo de huellas (`modelos/`). |
@@ -48,27 +48,31 @@ Si al reinstalar lo instalado tiene mejoras que el repositorio no trae, el insta
 - `memoria_mejorar(id)` y `memoria_rechazar(id)`: lo que el usuario contestó.
 - `memoria_mejora_estado(id)`: en qué está una mejora.
 
+Hay una más que no es para Claude: `memoria_mejora_agente`, con la que el mod anota cómo le va al agente que lanzó.
+
 ## Mejoras automáticas
 
 1. **Se nota una falla.** La reporta Claude en el chat (`memoria_reportar`, con el ejemplo concreto) o la detecta el servicio solo: tres búsquedas parecidas sin resultados en un grupo dejan una propuesta.
 2. **Se le pregunta al usuario**, en ese mismo chat, en una o dos oraciones. Si dice que no, no se vuelve a preguntar por lo mismo.
-3. **Si acepta, trabaja el guardián**, de fondo:
+3. **Si acepta, el guardián prepara el trabajo**, de fondo:
    - suma el ejemplo del reporte a la batería de preguntas;
    - arma una copia del código (`~/.memoria/trabajo/`) a partir de la versión instalada, que está en `~/.memoria/codigo`;
-   - lanza al agente (una sesión de Claude sin pantalla, hasta 30 minutos), que solo puede leer, editar `crates/servicio/` y `migraciones/`, y usar `cargo`;
-   - revisa que no haya tocado nada más, ni cambiado la base, borrado datos o sumado librerías sin que el usuario lo haya aceptado;
+   - deja el encargo: la carpeta de la copia, un `cargo` propio de esa mejora y el pedido con las reglas.
+4. **El cambio lo hace un agente dentro de Claude.** El mod de la conversación donde se aceptó lo lanza de fondo, con la sesión de Claude que ya está abierta: no hay que sacar ninguna llave ni configurar nada. Mientras tanto se puede seguir conversando. El mod le pone los límites y decide él cada permiso, sin que la app pregunte nada:
+   - lee y busca solo dentro de la copia;
+   - edita solo `crates/servicio/` y `migraciones/`;
+   - lo único que corre es `cargo build`, `check`, `test`, `clippy` y `fmt`, con el entorno mínimo (nada de la conversación pasa a lo que se compila) y sin red, salvo que el usuario haya aceptado sumar librerías;
+   - no tiene internet ni ninguna otra herramienta.
+5. **Cuando el agente termina, el guardián lo revisa todo:**
+   - que no haya tocado nada más, ni cambiado la base, borrado datos o sumado librerías sin que el usuario lo haya aceptado;
    - compila, corre las pruebas y el revisor de código;
    - corre la batería con el programa instalado y con el nuevo, cada uno sobre una copia de la base. El cambio se acepta solo si no rompe ninguna pregunta que andaba, no baja el puntaje y arregla el ejemplo del reporte.
-4. **Instala de a una:** respaldo de la base, reemplazo del programa (guardando el anterior), reinicio y 30 segundos de vigilancia. Si el servicio no queda sano, vuelve al programa anterior y, si el nuevo había cambiado la base, a la base del respaldo. La base que falló no se borra: queda al lado, como `memoria.db.fallida-…`.
-5. **Avisa en el chat** donde el usuario aceptó: una línea con el resultado y, si se instaló, un mensaje para que Claude retome lo que había fallado. Si esa conversación se cerró, el aviso aparece al reabrirla o, pasadas unas horas, en otra del mismo grupo.
+6. **Instala de a una:** respaldo de la base, reemplazo del programa (guardando el anterior), reinicio y 30 segundos de vigilancia. Si el servicio no queda sano, vuelve al programa anterior y, si el nuevo había cambiado la base, a la base del respaldo. La base que falló no se borra: queda al lado, como `memoria.db.fallida-…`.
+7. **Avisa en el chat** donde el usuario aceptó: una línea con el resultado y, si se instaló, un mensaje para que Claude retome lo que había fallado. Si esa conversación se cerró, el aviso aparece al reabrirla o, pasadas unas horas, en otra del mismo grupo.
 
 Hasta dos mejoras se trabajan a la vez. Si una se instala mientras otra estaba en marcha, la segunda se rehace sobre la versión nueva (una vez).
 
-Una cosa que hay que hacer una sola vez, a mano: **la llave del agente.** La sesión de la app de Claude no sirve fuera de la app, así que el agente necesita una llave propia. Se saca corriendo esto en la app Terminal (abre el navegador para autorizar):
-
-```bash
-~/.memoria/bin/conectar-agente.sh
-```
+El agente trabaja mientras la conversación donde se aceptó la mejora esté abierta. Si se cierra antes de que termine, la mejora queda esperando: el guardián arma la copia de nuevo y el agente arranca otra vez cuando esa conversación se vuelve a abrir (o, si pasan unas horas, en otra del mismo grupo). Un agente que no termina se lanza hasta tres veces; después la mejora queda sin instalar, con el motivo a la vista en el chat. Usa el plan de Claude del usuario, como cualquier otra tarea de fondo de la conversación.
 
 Cada mejora parte del commit de git del que salió lo instalado (`~/.memoria/instalada`). Si se instaló con cambios sin guardar en git, las mejoras quedan en pausa hasta guardarlos y correr el instalador de nuevo. Lo que hace cada mejora queda en su rama (`mejora-N-…`) dentro de `~/.memoria/codigo`, y la rama `instalada` de esa copia se adelanta a la versión nueva. El repositorio donde se desarrolla no se toca.
 
@@ -187,7 +191,7 @@ cargo clippy --all-targets      # tiene que quedar sin avisos
 
 Las consultas a la base son texto común dentro del código (no se revisan al compilar): por eso cada una tiene que estar cubierta por una prueba. Las palabras de cada nota y de cada pedazo de conversación se guardan ya reducidas a su raíz (`crates/servicio/src/texto.rs`); si cambia esa forma de reducirlas, el servicio arma de nuevo el índice de palabras al arrancar.
 
-Para probar el guardián de punta a punta sin tocar lo instalado se arma un ensayo: una copia de la base (cualquier respaldo sirve), un clon del repositorio, el servicio en otro puerto y el guardián apuntando a todo eso con `MEMORIA_DIR`, `MEMORIA_REPO`, `MEMORIA_SERVICIO`, `MEMORIA_REINICIO`, `MEMORIA_APAGADO` y `MEMORIA_AGENTE` (un programa cualquiera que haga de agente).
+Para probar el guardián de punta a punta sin tocar lo instalado se arma un ensayo: una copia de la base (cualquier respaldo sirve), un clon del repositorio, el servicio en otro puerto y el guardián apuntando a todo eso con `MEMORIA_DIR`, `MEMORIA_REPO`, `MEMORIA_SERVICIO`, `MEMORIA_REINICIO` y `MEMORIA_APAGADO`. El agente se imita a mano: se cambia algo en la copia de la mejora y se anota en la base lo que anotaría el mod (`fase = 'agente_listo'` y un `informe`).
 
 El mod se prueba con el Claude Code de la app (2.1.321 o más nuevo; el de la terminal puede ser más viejo). Está dentro de `~/Library/Application Support/Claude/claude-code/`:
 

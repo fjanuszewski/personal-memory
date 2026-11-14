@@ -137,27 +137,6 @@ pub async fn volver_a(cfg: &Config, respaldo: &Path, apodo: &str) -> anyhow::Res
 mod pruebas {
     use super::*;
 
-    fn config(dir: &Path) -> Config {
-        Config {
-            bd: dir.join("memoria.db"),
-            huellas: Vec::new(),
-            repo: dir.join("repo"),
-            dir: dir.to_owned(),
-            registros: dir.join("registros"),
-            servicio: "http://127.0.0.1:9".into(),
-            etiqueta: "prueba".into(),
-            agente: PathBuf::from("claude"),
-            limite_agente: Duration::from_secs(1),
-            ruta: "/usr/bin:/bin".into(),
-            a_la_vez: 1,
-            puerto_pruebas: 7400,
-            reinicio: None,
-            apagado: None,
-            casa: dir.to_owned(),
-            usuario: "prueba".into(),
-        }
-    }
-
     async fn valores(archivo: &Path) -> Vec<String> {
         let mut abierta = conexion(archivo).await.unwrap();
         let valores = sqlx::query_scalar("select valor from cosas order by id").fetch_all(&mut abierta).await.unwrap();
@@ -170,7 +149,7 @@ mod pruebas {
         let dir = std::env::temp_dir().join(format!("memoria-guardian-base-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let cfg = config(&dir);
+        let cfg = Config::de_prueba(&dir);
 
         // El servicio, con la base abierta y cosas escritas que todavía no
         // pasaron al archivo principal.

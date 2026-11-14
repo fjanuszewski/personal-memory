@@ -1,11 +1,13 @@
 //! El guardián de la memoria (punto 4.8 del diseño): toma las mejoras que
-//! el usuario aceptó, hace trabajar al agente en una copia, prueba lo que hizo, lo
-//! instala y vuelve atrás si algo falla. El agente no puede tocar este programa.
+//! el usuario aceptó, les arma una copia del código y deja el encargo para el
+//! agente, que corre de fondo dentro de una conversación de Claude. Cuando el
+//! agente termina, prueba lo que hizo, lo instala y vuelve atrás si algo
+//! falla. El agente no puede tocar este programa.
 
-pub mod agente;
 pub mod base;
 pub mod bateria;
 pub mod config;
+pub mod encargo;
 pub mod git;
 pub mod instalar;
 pub mod instancia;
@@ -21,11 +23,11 @@ use sqlx::SqlitePool;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use crate::agente::ClaudeCode;
 use crate::config::Config;
 use crate::mejora::Guardian;
 
-/// Cada cuánto se mira si hay mejoras aceptadas.
+/// Cada cuánto se mira si hay mejoras para preparar o para terminar, y cómo
+/// les va a los agentes.
 const CADA: Duration = Duration::from_secs(5);
 /// Cada cuánto se prueba de nuevo la base si no responde, y cada cuánto se avisa.
 const REINTENTO_BASE: Duration = Duration::from_secs(15);
@@ -67,19 +69,21 @@ pub async fn atender(cfg: Config, apagado: CancellationToken) -> anyhow::Result<
     let pool = conectar(&cfg, &apagado).await?;
     std::fs::create_dir_all(cfg.trabajo()).context("no pude crear la carpeta de trabajo")?;
     let a_la_vez = cfg.a_la_vez;
-    let agente = Arc::new(ClaudeCode::nuevo(cfg.clone()));
-    let guardian = Arc::new(Guardian::nuevo(cfg, pool, agente));
+    let guardian = Arc::new(Guardian::nuevo(cfg, pool));
     let retomadas = guardian.recuperar().await?;
     tracing::info!(retomadas, a_la_vez, "guardián atento a las mejoras aceptadas");
 
     let cupo = Arc::new(Semaphore::new(a_la_vez));
     loop {
+        if let Err(falla) = guardian.revisar_agentes().await {
+            tracing::warn!(falla = format!("{falla:#}"), "no pude mirar cómo les va a los agentes");
+        }
         while let Ok(lugar) = Arc::clone(&cupo).try_acquire_owned() {
             match guardian.tomar().await {
-                Ok(Some(mejora)) => {
+                Ok(Some(trabajo)) => {
                     let guardian = Arc::clone(&guardian);
                     tokio::spawn(async move {
-                        guardian.atender_una(&mejora).await;
+                        guardian.atender(&trabajo).await;
                         drop(lugar);
                     });
                 }

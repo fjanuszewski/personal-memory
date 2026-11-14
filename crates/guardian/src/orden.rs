@@ -1,4 +1,4 @@
-//! Lanzar otros programas (`git`, `cargo`, `pg_dump`, el agente) con un entorno
+//! Lanzar otros programas (`git`, `cargo` y demás) con un entorno
 //! limpio, un límite de tiempo y la salida guardada.
 
 use std::future::Future;
