@@ -1,0 +1,9 @@
+{
+  "name": "memoria",
+  "version": "0.5.0",
+  "description": "Memoria a largo plazo por grupo (empresa › proyecto): al empezar cada conversación la registra en el servicio memoria y le pasa a Claude el resumen del grupo y las reglas de uso (buscar por palabras y por significado, guardar y reemplazar notas).",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Fabián Januszewski"
+  }
+}

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Agente de launchd del servicio memoria: arranca con la sesión de macOS y
+  se vuelve a levantar si se cae. `instalar.sh` reemplaza __DIR__ (la carpeta
+  de instalación) y __CASA__, y lo copia a ~/Library/LaunchAgents/. Lo que se
+  quiera cambiar (por ejemplo, el modelo de huellas) va en el archivo
+  `ajustes` de la carpeta de instalación, no acá.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>personal-memory.memoria</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__DIR__/bin/memoria</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MEMORIA_DIR</key>
+    <string>__DIR__</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__DIR__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <!-- Prioridad normal: el modelo de huellas corre acá adentro, y con
+       prioridad de fondo macOS lo manda a los núcleos lentos justo cuando
+       Claude está esperando una búsqueda. -->
+  <key>ProcessType</key>
+  <string>Standard</string>
+
+  <key>StandardOutPath</key>
+  <string>__CASA__/Library/Logs/memoria/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__CASA__/Library/Logs/memoria/launchd.log</string>
+</dict>
+</plist>

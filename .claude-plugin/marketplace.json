@@ -1,0 +1,13 @@
+{
+  "name": "personal-memory",
+  "owner": {
+    "name": "Fabián Januszewski"
+  },
+  "description": "El mod memoria: memoria a largo plazo por grupo para Claude Code",
+  "plugins": [
+    {
+      "name": "memoria",
+      "source": "./mod"
+    }
+  ]
+}
