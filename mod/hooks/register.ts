@@ -235,6 +235,12 @@ function reintentar($: EngineInterface, intento: number): void {
 
 // Los agentes de la conversación que ya se sabe que no son de la memoria.
 const ajenos = new Set<string>()
+// Y los que se sabe que sí: solo a estos se les niega todo si el control falla.
+const propios = new Set<string>()
+// Cuántas veces seguidas no se pudo declarar el tipo de agente al querer lanzar uno, y por qué.
+let registrosFallidos = 0
+let errorDeRegistro = ''
+const REGISTROS_ANTES_DE_AVISAR = 3
 // Mientras se lanza uno: su primera llamada no puede adelantarse a que quede anotado.
 let lanzando: Promise<void> | null = null
 let tipoRegistrado = false
@@ -273,8 +279,9 @@ async function registrarTipo($: EngineInterface): Promise<boolean> {
       omitClaudeMd: true,
     })
     tipoRegistrado = true
-  } catch {
+  } catch (err) {
     // Queda para el próximo intento.
+    errorDeRegistro = motivoDe(err)
   }
 
   return tipoRegistrado
@@ -291,14 +298,22 @@ async function agenteDe($: EngineInterface, agentId: string): Promise<AgenteLanz
     await lanzando
     a = await anotado()
   }
-  if (a !== undefined) return a
+  if (a !== undefined) {
+    propios.add(agentId)
+
+    return a
+  }
   let lista
   try {
     lista = await $.agent.list()
   } catch {
     return null
   }
-  if (lista.some(x => x.id === agentId && x.type === TIPO_AGENTE)) return 'sin-encargo'
+  if (lista.some(x => x.id === agentId && x.type === TIPO_AGENTE)) {
+    propios.add(agentId)
+
+    return 'sin-encargo'
+  }
   ajenos.add(agentId)
 
   return null
@@ -342,7 +357,20 @@ async function buscarAgente($: EngineInterface, descripcion: string): Promise<st
 
 // Toma una mejora para esta conversación y lanza su agente, de fondo.
 async function lanzarAgente($: EngineInterface, sesion: string, encargo: Encargo): Promise<void> {
-  if (!(await registrarTipo($))) return
+  if (!(await registrarTipo($))) {
+    // Se prueba de nuevo en la próxima vuelta. Si no hay caso, se anota como
+    // un agente que no arrancó, para que el usuario se entere por el chat.
+    registrosFallidos += 1
+    if (registrosFallidos < REGISTROS_ANTES_DE_AVISAR) return
+    registrosFallidos = 0
+    if (await avisarAgente($, sesion, encargo.id, 'empezo')) {
+      const motivo = `Claude no aceptó el agente de la memoria: ${errorDeRegistro || 'no dijo por qué'}`
+      await avisarAgente($, sesion, encargo.id, 'fallo', motivo).catch(() => false)
+    }
+
+    return
+  }
+  registrosFallidos = 0
   // Si la tomó otra conversación, o ya hay demasiados agentes, no es para esta.
   if (!(await avisarAgente($, sesion, encargo.id, 'empezo'))) return
   let listo: () => void = () => undefined
@@ -360,6 +388,7 @@ async function lanzarAgente($: EngineInterface, sesion: string, encargo: Encargo
     })
     const agentId = r.deny === undefined ? (r.agentId ?? (await buscarAgente($, descripcion))) : undefined
     if (agentId !== undefined) {
+      propios.add(agentId)
       await update($, agentes, prev => ({
         lanzados: {
           ...prev.lanzados,
@@ -747,7 +776,9 @@ export const register: Register = on => {
 
     return next({ ...e, ...v.cambio } as typeof e)
   }).catch(($, e, next) => {
-    if (next.called || e.agentId === undefined || ajenos.has(e.agentId)) return next(e)
+    // Si el control falla, solo se frena a un agente que se sabe que es de la
+    // memoria: lo de la conversación y lo de cualquier otro agente sigue.
+    if (next.called || e.agentId === undefined || !propios.has(e.agentId)) return next(e)
 
     return { deny: 'Falló el control de la memoria: no hagas nada más y terminá ahora.' }
   })
@@ -764,7 +795,7 @@ export const register: Register = on => {
 
     return motivo === null ? { decision: 'allow' as const } : { decision: 'deny' as const, reason: motivo }
   }).catch(($, e, next) => {
-    if (e.agentId === undefined || ajenos.has(e.agentId)) return next(e)
+    if (e.agentId === undefined || !propios.has(e.agentId)) return next(e)
 
     return { decision: 'deny' as const, reason: 'Falló el control de la memoria.' }
   })

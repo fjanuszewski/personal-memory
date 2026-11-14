@@ -62,6 +62,8 @@ type Mejoras = {
   fallasAlAnotar?: number
   /** Si Claude se niega a lanzar al agente, con qué motivo. */
   noLanza?: string
+  /** Si Claude no acepta el tipo de agente, con qué motivo. */
+  noRegistra?: string
 }
 
 type Lanzado = { prompt: string; description?: string; subagentType?: string; cwd?: string }
@@ -127,6 +129,7 @@ function mundo(on: On, o: Mundo = {}): Visto {
     return { decision: 'allow' as const }
   })
   on('agent.register', (_, e) => {
+    if (o.mejoras?.noRegistra !== undefined) return { deny: o.mejoras.noRegistra } as never
     visto.tipos.push(e as unknown as Record<string, unknown>)
 
     return { value: { agent: `memoria:${e.name}` } }
@@ -812,6 +815,23 @@ test('si Claude no deja lanzarlo, o el agente se corta, lo anota para que el gua
     paso: 'fallo',
     texto: 'El agente se cortó por un error de Claude.',
   })
+})
+
+test('si Claude no acepta el tipo de agente, insiste un poco y después lo anota para que se vea en el chat', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-14T15:00:00.000Z') })
+  const visto = mundo(on, { mejoras: { ...lista(), noRegistra: 'el tipo de agente no es válido' } })
+  await $.session.start(INICIO)
+  await clock.settle()
+  await clock.advance(10_000)
+  expect(pasos(visto)).toEqual([])
+  expect(visto.lanzados).toEqual([])
+
+  await clock.advance(10_000)
+  expect(pasos(visto).map(p => p.paso)).toEqual(['empezo', 'fallo'])
+  const motivo = String(pasos(visto).at(-1)?.texto)
+  expect(motivo).toContain('Claude no aceptó el agente de la memoria')
+  expect(motivo).toContain('el tipo de agente no es válido')
+  expect(visto.lanzados).toEqual([])
 })
 
 test('si el guardián le saca la mejora, al agente se le niega todo y no se avisa nada por él', async ($, on) => {
