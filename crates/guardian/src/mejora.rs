@@ -628,6 +628,47 @@ impl Guardian {
             }
         }
         self.agentes.lock().await.retain(|id, _| trabajando.contains(id));
+        self.rearmar_las_viejas().await
+    }
+
+    /// Una copia que se armó sobre una versión que ya no es la instalada (se
+    /// instaló otra mejora, o se reinstaló a mano) no sirve: lo que hiciera
+    /// un agente ahí habría que rehacerlo. Mientras nadie la tomó, se arma de
+    /// nuevo sobre la versión instalada.
+    async fn rearmar_las_viejas(&self) -> anyhow::Result<()> {
+        let esperando: Vec<(i64, String)> = sqlx::query_as(
+            "select id, desde_version from mejoras
+             where estado = 'en_curso' and fase = 'esperando_agente' and desde_version is not null
+             order by id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        if esperando.is_empty() {
+            return Ok(());
+        }
+        let Ok(instalada) = git::version_instalada(&self.cfg).await else {
+            return Ok(());
+        };
+        for (id, desde) in esperando.into_iter().filter(|(_, desde)| *desde != instalada) {
+            let tomada = sqlx::query(
+                "update mejoras set fase = 'preparando', fase_desde = ?2
+                 where id = ?1 and estado = 'en_curso' and fase = 'esperando_agente'",
+            )
+            .bind(id)
+            .bind(chrono::Utc::now())
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if tomada == 0 {
+                // Justo la tomó una conversación: se verá al terminar el agente.
+                continue;
+            }
+            tracing::info!(mejora = id, desde, instalada, "la copia quedó vieja: se arma de nuevo sobre lo instalado");
+            let m = leer(&self.pool, id).await?;
+            if let Err(falla) = self.preparar(&m).await {
+                self.cerrar(&m, falla.into()).await;
+            }
+        }
         Ok(())
     }
 
@@ -978,6 +1019,18 @@ mod pruebas {
         assert!(!copia.join("crates/servicio/src/sobra.rs").exists());
         assert_eq!(e.texto(id, "agente_sesion").await, None);
         assert_eq!(e.texto(id, "cast(lanzamientos as text)").await.as_deref(), Some("1"));
+
+        // Si mientras espera se instala otra versión, la copia se arma de nuevo sobre ella.
+        std::fs::write(e.cfg().repo.join("README.md"), "# Con otra versión\n").unwrap();
+        let nueva = e.guardar_en_el_codigo("otra versión");
+        e.guardian.revisar_agentes().await.unwrap();
+        assert_eq!(e.estado(id).await, ("en_curso".into(), Some("esperando_agente".into())));
+        assert_eq!(e.texto(id, "desde_version").await.as_deref(), Some(nueva.as_str()));
+        assert_eq!(std::fs::read_to_string(copia.join("README.md")).unwrap(), "# Con otra versión\n");
+        // Sin cambios de versión, no la toca más.
+        let desde = e.texto(id, "fase_desde").await;
+        e.guardian.revisar_agentes().await.unwrap();
+        assert_eq!(e.texto(id, "fase_desde").await, desde);
 
         // Al tercero que no termina, la mejora queda sin instalar y no queda nada armado.
         e.con_agente(id, LANZAMIENTOS).await;

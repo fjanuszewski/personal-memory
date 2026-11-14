@@ -9,7 +9,7 @@ use chrono::Utc;
 use comun::{busqueda, empezar, estado, nota};
 use memoria::error::Error;
 use memoria::estado::Estado;
-use memoria::mcp::{self, PedidoAgente, PedidoEstado, PedidoMejorar, PedidoRechazar, PedidoReportar};
+use memoria::mcp::{self, PasoDelAgente, PedidoEstado, PedidoMejorar, PedidoRechazar, PedidoReportar};
 use memoria::modelo::TipoNota;
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -54,11 +54,20 @@ async fn agentes(e: &Estado, sesion: &str, andando: &[i64]) -> (Vec<i64>, Vec<i6
     (ids(&v["para_agente"]), ids(&v["con_agente"]))
 }
 
-/// Un paso del agente, como lo anota el mod. Devuelve si valió.
-async fn paso(e: &Estado, id: i64, sesion: &str, paso: &str, texto: Option<&str>) -> bool {
-    let pedido = PedidoAgente { id, sesion: sesion.into(), paso: paso.into(), texto: texto.map(Into::into) };
-    let v: Value = serde_json::from_str(&mcp::agente(e, &pedido).await.unwrap()).unwrap();
-    v["ok"].as_bool().unwrap()
+/// Un paso del agente, como lo manda el mod junto con su pregunta de siempre.
+fn con_paso(id: i64, sesion: &str, que: &str, texto: Option<&str>) -> PedidoEstado {
+    PedidoEstado {
+        sesion: Some(sesion.into()),
+        paso: Some(PasoDelAgente { id, que: que.into(), texto: texto.map(Into::into) }),
+        ..PedidoEstado::default()
+    }
+}
+
+/// Anota un paso del agente. Devuelve si valió.
+async fn paso(e: &Estado, id: i64, sesion: &str, que: &str, texto: Option<&str>) -> bool {
+    let v: Value =
+        serde_json::from_str(&mcp::mejora_estado(e, &con_paso(id, sesion, que, texto)).await.unwrap()).unwrap();
+    v["paso"].as_bool().unwrap()
 }
 
 /// El guardián tomó la mejora, armó la copia y dejó el encargo.
@@ -360,6 +369,7 @@ async fn el_agente_lo_lanza_la_conversacion_donde_se_acepto() {
     dejar_lista(&pool, 1, 0).await;
     let pedido = PedidoEstado { sesion: Some("local_a".into()), ..PedidoEstado::default() };
     let v: Value = serde_json::from_str(&mcp::mejora_estado(&e, &pedido).await.unwrap()).unwrap();
+    assert!(v["paso"].is_null(), "sin paso en el pedido, la respuesta no dice si valió");
     // El encargo del guardián llega tal cual.
     assert_eq!(v["para_agente"][0]["id"], 1);
     assert_eq!(v["para_agente"][0]["encargo"]["copia"], "/tmp/memoria/trabajo/mejora-1");
@@ -413,8 +423,8 @@ async fn el_agente_lo_lanza_la_conversacion_donde_se_acepto() {
 
     // Un paso que no existe, o de una conversación desconocida, es un error de uso.
     for (sesion, que) in [("local_a", "otro"), ("local_nadie", "empezo")] {
-        let pedido = PedidoAgente { id: 1, sesion: sesion.into(), paso: que.into(), texto: None };
-        assert!(matches!(mcp::agente(&e, &pedido).await, Err(Error::Uso(_))), "{sesion} {que}");
+        let pedido = con_paso(1, sesion, que, None);
+        assert!(matches!(mcp::mejora_estado(&e, &pedido).await, Err(Error::Uso(_))), "{sesion} {que}");
     }
 
     // Si no se pudo y el usuario la acepta de nuevo, arranca limpia.

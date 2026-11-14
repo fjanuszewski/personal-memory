@@ -48,7 +48,7 @@ Si al reinstalar lo instalado tiene mejoras que el repositorio no trae, el insta
 - `memoria_mejorar(id)` y `memoria_rechazar(id)`: lo que el usuario contestó.
 - `memoria_mejora_estado(id)`: en qué está una mejora.
 
-Hay una más que no es para Claude: `memoria_mejora_agente`, con la que el mod anota cómo le va al agente que lanzó.
+Con `sesion` en vez de `id`, `memoria_mejora_estado` es además el canal del mod: le cuenta qué pasa con las mejoras de esa conversación y recibe los pasos del agente que el mod lanzó.
 
 ## Mejoras automáticas
 

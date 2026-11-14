@@ -211,34 +211,37 @@ function mundo(on: On, o: Mundo = {}): Visto {
       const vistos = (llamada.args.vistos as number[] | undefined) ?? []
       mejoras.avisos = mejoras.avisos.filter(a => !vistos.includes(a.id))
 
+      // Un paso del agente viaja con la misma pregunta. Como el servicio:
+      // la mejora la toma quien llega primero, y solo esa conversación dice
+      // cómo terminó su agente.
+      const paso = llamada.args.paso as { id: number; que: string } | undefined
+      let valio: boolean | null = null
+      if (paso !== undefined) {
+        if ((mejoras.fallasAlAnotar ?? 0) > 0) {
+          mejoras.fallasAlAnotar = (mejoras.fallasAlAnotar ?? 0) - 1
+
+          return texto('memoria apagada', true)
+        }
+        const lista = (mejoras.paraAgente ?? []).some(a => a.id === paso.id)
+        const suya = (mejoras.conAgente ?? []).includes(paso.id)
+        valio = true
+        if (paso.que === 'empezo' && lista) {
+          mejoras.paraAgente = (mejoras.paraAgente ?? []).filter(a => a.id !== paso.id)
+          mejoras.conAgente = [...(mejoras.conAgente ?? []), paso.id]
+        } else if (paso.que !== 'empezo' && suya) {
+          mejoras.conAgente = (mejoras.conAgente ?? []).filter(m => m !== paso.id)
+        } else valio = false
+      }
+
       return texto(
         JSON.stringify({
           en_curso: mejoras.enCurso,
           avisos: mejoras.avisos,
           para_agente: mejoras.paraAgente ?? [],
           con_agente: mejoras.conAgente ?? [],
+          paso: valio,
         }),
       )
-    }
-    if (llamada.server === 'memoria' && llamada.tool === 'memoria_mejora_agente') {
-      const mejoras = o.mejoras ?? { enCurso: [], avisos: [] }
-      if ((mejoras.fallasAlAnotar ?? 0) > 0) {
-        mejoras.fallasAlAnotar = (mejoras.fallasAlAnotar ?? 0) - 1
-
-        return texto('memoria apagada', true)
-      }
-      const { id, paso } = llamada.args as { id: number; paso: string }
-      const lista = (mejoras.paraAgente ?? []).some(a => a.id === id)
-      const suya = (mejoras.conAgente ?? []).includes(id)
-      // Como el servicio: la toma quien llega primero, y solo esa conversación dice cómo terminó.
-      if (paso === 'empezo' && lista) {
-        mejoras.paraAgente = (mejoras.paraAgente ?? []).filter(a => a.id !== id)
-        mejoras.conAgente = [...(mejoras.conAgente ?? []), id]
-      } else if (paso !== 'empezo' && suya) {
-        mejoras.conAgente = (mejoras.conAgente ?? []).filter(m => m !== id)
-      } else return texto(JSON.stringify({ ok: false }))
-
-      return texto(JSON.stringify({ ok: true }))
     }
 
     return texto('herramienta desconocida', true)
@@ -250,11 +253,20 @@ function mundo(on: On, o: Mundo = {}): Visto {
 const registros = (v: Visto) =>
   v.llamadas.filter(l => l.server === 'memoria' && l.tool === 'memoria_contexto')
 const deLaApp = (v: Visto) => v.llamadas.filter(l => l.server === 'ccd_session_mgmt')
-const porMejoras = (v: Visto) =>
+const aLaMemoria = (v: Visto) =>
   v.llamadas.filter(l => l.server === 'memoria' && l.tool === 'memoria_mejora_estado')
-// Lo que el mod le anotó al servicio sobre sus agentes.
+// Las preguntas de cada vuelta por las mejoras de la conversación.
+const porMejoras = (v: Visto) => aLaMemoria(v).filter(l => l.args.paso === undefined)
+// Lo que el mod le anotó al servicio sobre sus agentes: va con la misma
+// herramienta, que es la que conoce cualquier conversación ya abierta.
 const pasos = (v: Visto) =>
-  v.llamadas.filter(l => l.server === 'memoria' && l.tool === 'memoria_mejora_agente').map(l => l.args)
+  aLaMemoria(v).flatMap(l => {
+    const paso = l.args.paso as { id: number; que: string; texto?: string } | undefined
+    if (paso === undefined) return []
+    const { id, que, ...resto } = paso
+
+    return [{ id, sesion: l.args.sesion, paso: que, ...resto }]
+  })
 
 // Lo que el motor le pasa al armar las instrucciones de un pedido.
 const PEDIDO: PromptComposeInput = {
@@ -832,6 +844,10 @@ test('si Claude no acepta el tipo de agente, insiste un poco y después lo anota
   expect(motivo).toContain('Claude no aceptó el agente de la memoria')
   expect(motivo).toContain('el tipo de agente no es válido')
   expect(visto.lanzados).toEqual([])
+  // Lo que salió mal se le cuenta al servicio una vez, para que quede en su registro.
+  const contados = porMejoras(visto).flatMap(l => (typeof l.args.problema === 'string' ? [l.args.problema] : []))
+  expect(contados.length).toBe(1)
+  expect(contados[0]).toContain('el tipo de agente no es válido')
 })
 
 test('si el guardián le saca la mejora, al agente se le niega todo y no se avisa nada por él', async ($, on) => {
@@ -888,7 +904,7 @@ test('si la app deja de tener al agente, lo anota como caído', async ($, on) =>
   })
 })
 
-test('Claude no ve al agente entre los que puede usar ni puede anotar por él', async ($, on) => {
+test('Claude no ve al agente entre los que puede usar', async ($, on) => {
   const clock = mock.clock(on)
   mundo(on)
   await $.session.start(INICIO)
@@ -896,8 +912,6 @@ test('Claude no ve al agente entre los que puede usar ni puede anotar por él', 
   const oferta = { description: 'x', source: 'plugin', provider: { plugin: 'memoria', tier: 'user' as const } }
   expect((await $.agent.offer({ agent: 'memoria:mantenimiento', ...oferta })).isOffered).toBe(false)
   expect((await $.agent.offer({ agent: 'Explore', ...oferta })).isOffered).toBe(true)
-  const r = await $.tool.call({ tool: 'mcp__memoria__memoria_mejora_agente', id: 7, sesion: 'local_1', paso: 'termino' })
-  expect(r.deny).toContain('la usa sola la memoria')
 })
 
 test('las reglas del agente, sin la app', () => {

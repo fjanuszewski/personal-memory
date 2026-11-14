@@ -53,8 +53,6 @@ const ESPERA_REVISION_MS = 3_000
 // Mientras haya una mejora en curso lanzada desde acá, cada cuánto se pregunta por ella.
 const CADA_MEJORA_MS = 10_000
 const HERRAMIENTA_MEJORAR = 'mcp__memoria__memoria_mejorar'
-// La que usa el mod para anotar cómo le va al agente: Claude no la llama.
-const HERRAMIENTA_AGENTE = 'mcp__memoria__memoria_mejora_agente'
 const SIN_RESUMEN = 'El agente terminó, pero no quedó registrado su resumen.'
 
 // Cambiar la etiqueta si cambian los campos (o si lo guardado por una versión
@@ -241,6 +239,10 @@ const propios = new Set<string>()
 let registrosFallidos = 0
 let errorDeRegistro = ''
 const REGISTROS_ANTES_DE_AVISAR = 3
+// Lo último que salió mal al atender a los agentes: se ve con /memoria y, la
+// primera vez, se le cuenta al servicio para que quede en su registro.
+let problema = ''
+let problemaContado = ''
 // Mientras se lanza uno: su primera llamada no puede adelantarse a que quede anotado.
 let lanzando: Promise<void> | null = null
 let tipoRegistrado = false
@@ -320,22 +322,24 @@ async function agenteDe($: EngineInterface, agentId: string): Promise<AgenteLanz
 }
 
 // Le anota al servicio un paso del agente de una mejora. Devuelve si valió.
+// Va con la misma herramienta con que el mod pregunta por las mejoras: una
+// conversación que ya estaba abierta cuando se actualizó el servicio no
+// conoce sus herramientas nuevas.
 async function avisarAgente(
   $: EngineInterface,
   sesion: string,
   id: number,
-  paso: 'empezo' | 'termino' | 'fallo',
+  que: 'empezo' | 'termino' | 'fallo',
   texto?: string,
 ): Promise<boolean> {
-  const r = await pedirMemoria($, 'memoria_mejora_agente', {
-    id,
+  const r = await pedirMemoria($, 'memoria_mejora_estado', {
     sesion,
-    paso,
-    ...(texto === undefined ? {} : { texto }),
+    vistos: [],
+    paso: { id, que, ...(texto === undefined ? {} : { texto }) },
   })
   const leido: unknown = JSON.parse(r)
 
-  return typeof leido === 'object' && leido !== null && (leido as { ok?: unknown }).ok === true
+  return typeof leido === 'object' && leido !== null && (leido as { paso?: unknown }).paso === true
 }
 
 const TERMINADO = ['completed', 'failed', 'killed']
@@ -361,6 +365,7 @@ async function lanzarAgente($: EngineInterface, sesion: string, encargo: Encargo
     // Se prueba de nuevo en la próxima vuelta. Si no hay caso, se anota como
     // un agente que no arrancó, para que el usuario se entere por el chat.
     registrosFallidos += 1
+    problema = `Claude no aceptó el agente de la memoria: ${errorDeRegistro || 'no dijo por qué'}`
     if (registrosFallidos < REGISTROS_ANTES_DE_AVISAR) return
     registrosFallidos = 0
     if (await avisarAgente($, sesion, encargo.id, 'empezo')) {
@@ -395,6 +400,7 @@ async function lanzarAgente($: EngineInterface, sesion: string, encargo: Encargo
           [agentId]: { mejora: encargo.id, copia: encargo.copia, cargo: encargo.cargo },
         },
       }))
+      problema = ''
 
       return
     }
@@ -405,6 +411,7 @@ async function lanzarAgente($: EngineInterface, sesion: string, encargo: Encargo
     lanzando = null
     listo()
   }
+  problema = motivo
   await avisarAgente($, sesion, encargo.id, 'fallo', motivo).catch(() => false)
 }
 
@@ -516,14 +523,20 @@ async function revisarMejoras($: EngineInterface): Promise<void> {
     const andando = Object.values((await read($, agentes)).lanzados)
       .filter(a => !a.anulado)
       .map(a => a.mejora)
-    const pedir = async (vistos: number[]) =>
-      leerEstado(
+    const pedir = async (vistos: number[]) => {
+      const nuevo = problema !== '' && problema !== problemaContado ? problema : undefined
+      const leido = leerEstado(
         await pedirMemoria($, 'memoria_mejora_estado', {
           sesion: c.sesion,
           vistos,
           ...(andando.length > 0 ? { agentes: andando } : {}),
+          ...(nuevo === undefined ? {} : { problema: nuevo }),
         }),
       )
+      if (nuevo !== undefined) problemaContado = nuevo
+
+      return leido
+    }
     let { mostrados } = await read($, avisos)
     let estado = await pedir(mostrados)
     // Lo que el servicio ya no devuelve quedó anotado como avisado.
@@ -549,7 +562,10 @@ async function revisarMejoras($: EngineInterface): Promise<void> {
     }
     const anotados = mostrados
     await update($, avisos, () => ({ mostrados: anotados }))
-    await atenderAgentes($, c.sesion, estado).catch(() => undefined)
+    await atenderAgentes($, c.sesion, estado).catch(err => {
+      // No se pierde: queda a la vista con /memoria y se prueba de nuevo en la próxima vuelta.
+      problema = `No pude atender al agente de la memoria: ${motivoDe(err)}`
+    })
     const conAgentes = Object.keys((await read($, agentes)).lanzados).length > 0
     if (estado.enCurso.length > 0 || mostrados.length > 0 || conAgentes || estado.paraAgente.length > 0) vigilar($)
     else dejarDeVigilar()
@@ -613,6 +629,7 @@ function estado(c: Contexto | null, e: Entrega, a: Agentes): string {
   for (const agente of Object.values(a.lanzados)) {
     if (!agente.anulado && !agente.aviso) lineas.push(`Un agente trabaja de fondo en la mejora ${agente.mejora}.`)
   }
+  if (problema !== '') lineas.push(problema)
   if (c.resumen !== null) lineas.push('', c.resumen)
 
   return lineas.join('\n')
@@ -802,11 +819,6 @@ export const register: Register = on => {
 
   // Al agente lo lanza el mod: Claude no lo ve entre los que puede usar.
   on('agent.offer', { agent: 'memoria:mantenimiento' }, () => ({ isOffered: false }))
-
-  // Y la herramienta con que el mod anota cómo le va al agente no es para Claude.
-  on('tool.call', { tool: HERRAMIENTA_AGENTE }, () => ({
-    deny: 'Esta herramienta la usa sola la memoria: no hace falta llamarla.',
-  }))
 
   on('command.run', { command: 'memoria' }, async $ => {
     await lanzar($)
