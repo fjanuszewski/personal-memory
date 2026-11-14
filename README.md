@@ -194,3 +194,9 @@ El mod se prueba con el Claude Code de la app (2.1.321 o más nuevo; el de la te
 ```bash
 claude plugin test mod
 ```
+
+## Licencia
+
+MIT: se puede usar, copiar, cambiar y compartir libremente, sin garantías. El texto completo está en [LICENSE](LICENSE).
+
+El modelo de huellas que se baja por defecto (EmbeddingGemma, de Google) no es parte de este repositorio y tiene su propia licencia, la de Gemma. Quien prefiera un modelo con licencia MIT puede elegir `e5-small` o `bge-m3` (ver «El modelo de huellas»).
