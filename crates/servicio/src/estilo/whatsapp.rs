@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{ConnectOptions, SqlitePool};
 
 use super::idioma;
 use super::propios::{self, Propio};
@@ -206,13 +206,21 @@ async fn juntar_de(
         .fetch_optional(pool)
         .await?;
     let mut ultimo = leido.unwrap_or(0);
-    let recibidos = recibidos(whatsapp).await.context("la base de WhatsApp no tiene la forma esperada")?;
+    // Lo recibido se repasa entero, así que se lee recién cuando hay algo
+    // nuevo del usuario para comparar: lo más común es que no haya nada.
+    let mut recibidos: Option<HashMap<String, f64>> = None;
     let mut juntado = Juntado::default();
     let mut por_chat: HashMap<String, DelChat> = HashMap::new();
     loop {
         let tanda = mandados(whatsapp, ultimo).await.context("la base de WhatsApp no tiene la forma esperada")?;
         let Some((mayor, ..)) = tanda.last() else { break };
         ultimo = *mayor;
+        let recibidos = match &mut recibidos {
+            Some(ya_leidos) => ya_leidos,
+            vacio => {
+                vacio.insert(self::recibidos(whatsapp).await.context("la base de WhatsApp no tiene la forma esperada")?)
+            }
+        };
         for (_, texto, segundos, banderas, chat, interno) in &tanda {
             if !es_chat(interno.as_deref()) || excluido(chat.as_deref(), &cfg.sin) {
                 continue;
@@ -263,9 +271,11 @@ async fn juntar_de(
 /// usuario en contestarle a macOS si deja leer.
 pub async fn juntar(pool: &SqlitePool, cfg: &WhatsApp, nombre: &str, anotar: bool) -> anyhow::Result<Juntado> {
     let copia = copiar(cfg.base.clone()).await?;
+    // Es una base ajena, sin índices para lo que se le pregunta: que una
+    // consulta tarde un segundo es lo esperado, y no va al registro.
     let whatsapp = SqlitePoolOptions::new()
         .max_connections(1)
-        .connect_with(SqliteConnectOptions::new().filename(copia.archivo()))
+        .connect_with(SqliteConnectOptions::new().filename(copia.archivo()).disable_statement_logging())
         .await
         .context("no pude abrir la copia de la base de WhatsApp")?;
     let resultado = juntar_de(pool, &whatsapp, cfg, nombre, anotar).await;
