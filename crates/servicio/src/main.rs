@@ -2,6 +2,7 @@ use std::fs;
 
 use anyhow::Context;
 use memoria::config::Config;
+use memoria::estilo::fuentes::Modo;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::filter::LevelFilter;
@@ -44,9 +45,25 @@ async fn main() -> anyhow::Result<()> {
             println!("memoria {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
+        // Lo que corre el mod desde Claude Code: lee las fuentes encendidas y sale.
+        Some("juntar") => {
+            let modo = match std::env::args().nth(2).as_deref() {
+                None => Modo::SiToca,
+                Some("--ya") => Modo::Ya,
+                Some("--probar") => Modo::Probar,
+                Some(otro) => anyhow::bail!("«juntar» no conoce «{otro}»: va solo, con «--ya» o con «--probar»"),
+            };
+            let (bien, resumen) = memoria::juntar(&cfg, modo).await?;
+            println!("{resumen}");
+            if !bien {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
         Some(otro) => {
             anyhow::bail!(
-                "no conozco «{otro}»: sin nada arranca el servicio; «preparar» deja lista la base y el modelo"
+                "no conozco «{otro}»: sin nada arranca el servicio; «preparar» deja lista la base y el modelo; \
+                 «juntar» lee las fuentes encendidas"
             )
         }
     }

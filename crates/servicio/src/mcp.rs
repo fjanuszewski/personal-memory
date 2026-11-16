@@ -566,6 +566,8 @@ pub async fn mejora_estado(e: &Estado, p: &PedidoEstado) -> Resultado<String> {
             "con_agente": avisos.con_agente,
             // Si el paso que traía el pedido valió; null si no traía ninguno.
             "paso": valio,
+            // Si toca leer las fuentes encendidas: el programa que el mod tiene que correr; si no, null.
+            "juntar": por_juntar(e).await?,
         })
         .to_string());
     }
@@ -610,6 +612,17 @@ pub async fn mejora_estado(e: &Estado, p: &PedidoEstado) -> Resultado<String> {
         ),
         EstadoMejora::Rechazada => format!("Mejora {id}: el usuario la rechazó."),
     })
+}
+
+/// Si hay fuentes encendidas y ya toca leerlas, el programa que las lee:
+/// este mismo, con la orden `juntar`. Lo corre el mod desde Claude Code, que
+/// es a quien el sistema le da (o no) permiso para ver los datos de otras
+/// aplicaciones.
+async fn por_juntar(e: &Estado) -> Resultado<Option<String>> {
+    if !estilo::fuentes::toca(&e.pool, &e.fuentes).await? {
+        return Ok(None);
+    }
+    Ok(std::env::current_exe().ok().and_then(|programa| programa.to_str().map(str::to_owned)))
 }
 
 /// Espera, hasta `limite`, a que el guardián deje lista la copia de una mejora

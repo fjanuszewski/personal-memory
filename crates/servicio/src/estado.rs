@@ -8,6 +8,7 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use tokio::sync::Notify;
 
+use crate::config::Fuentes;
 use crate::huellas::{Huellas, Uso};
 use crate::indice::Indice;
 
@@ -55,6 +56,9 @@ pub struct Estado {
     pub nombre: Arc<str>,
     /// Despierta a la tarea que completa las huellas que faltan.
     pub pendientes: Arc<Notify>,
+    /// Las fuentes encendidas para aprender cómo escribe el usuario, aparte
+    /// de sus conversaciones con Claude.
+    pub fuentes: Arc<Fuentes>,
     salud_huellas: Arc<AtomicU8>,
 }
 
@@ -68,6 +72,7 @@ impl Estado {
             indice: Arc::new(Indice::default()),
             nombre: Arc::from(NOMBRE_POR_DEFECTO),
             pendientes: Arc::new(Notify::new()),
+            fuentes: Arc::new(Fuentes::default()),
             salud_huellas: Arc::new(AtomicU8::new(SIN_PROBAR)),
         }
     }

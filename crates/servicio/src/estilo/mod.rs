@@ -7,10 +7,12 @@
 //! responde la herramienta `memoria_estilo` ([`consultar`]). Todo queda en la
 //! base de esta máquina y no hay ningún modelo de por medio: son cuentas.
 
+pub mod fuentes;
 pub mod idioma;
 pub mod lexico;
 pub mod numeros;
 pub mod propios;
+pub mod whatsapp;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -194,6 +196,8 @@ pub fn leer_lugar(texto: &str) -> String {
 struct Mensaje {
     lugar: String,
     idioma: String,
+    /// Si se lo mandó a alguien (por una mensajería, por correo) y no a Claude.
+    dirigido: bool,
     para: Option<String>,
     fecha: DateTime<Utc>,
     contenido: String,
@@ -202,7 +206,8 @@ struct Mensaje {
     grupo: Option<String>,
 }
 
-type Fila = (String, String, Option<String>, DateTime<Utc>, String, Option<i64>, Option<String>, Option<String>);
+type Fila =
+    (String, String, String, Option<String>, DateTime<Utc>, String, Option<i64>, Option<String>, Option<String>);
 
 /// Cuántos mensajes hay de cada lugar y de cada idioma.
 async fn cuentas(pool: &SqlitePool) -> Resultado<Vec<(String, String, usize)>> {
@@ -218,7 +223,7 @@ async fn cuentas(pool: &SqlitePool) -> Resultado<Vec<(String, String, usize)>> {
 /// idioma; con `con_cortos`, también los que son muy cortos para tener idioma.
 async fn mensajes(pool: &SqlitePool, lugar: Option<&str>, idioma: &str, con_cortos: bool) -> Resultado<Vec<Mensaje>> {
     let filas: Vec<Fila> = sqlx::query_as(
-        "select m.lugar, m.idioma, m.para, m.fecha, m.contenido, c.grupo_id, g.empresa, g.proyecto
+        "select m.fuente, m.lugar, m.idioma, m.para, m.fecha, m.contenido, c.grupo_id, g.empresa, g.proyecto
          from mensajes_propios m
          left join conversaciones c on m.fuente = 'claude' and c.id = m.conversacion
          left join grupos g on g.id = c.grupo_id
@@ -233,9 +238,10 @@ async fn mensajes(pool: &SqlitePool, lugar: Option<&str>, idioma: &str, con_cort
     .await?;
     Ok(filas
         .into_iter()
-        .map(|(lugar, idioma, para, fecha, contenido, grupo_id, empresa, proyecto)| Mensaje {
+        .map(|(fuente, lugar, idioma, para, fecha, contenido, grupo_id, empresa, proyecto)| Mensaje {
             lugar,
             idioma,
+            dirigido: fuente != FUENTE_CLAUDE,
             para,
             fecha,
             contenido,
@@ -294,24 +300,34 @@ fn sirve_de_ejemplo(contenido: &str) -> bool {
         && !contenido.split_whitespace().any(parece_un_dato)
 }
 
-/// Elige los mensajes que mejor sirven de ejemplo. Los del grupo de la
-/// conversación que pregunta van siempre antes que los de otros, que solo
-/// completan si faltan. Dentro de cada parte: primero lo que le escribió a
-/// esa persona, después lo que habla de lo mismo, y entre iguales lo más nuevo.
+/// Si un mensaje se le puede mostrar a quien pregunta. Lo que el usuario le
+/// mandó a alguien (por una mensajería, por correo) es de esa charla: se
+/// muestra solo cuando se pregunta cómo le escribe a esa persona o a ese
+/// grupo, y se sabe que era para ella. Lo que le escribió a Claude vale siempre.
+fn se_puede_mostrar(m: &Mensaje, para: Option<&str>) -> bool {
+    if !m.dirigido {
+        return true;
+    }
+    match (&m.para, para) {
+        (Some(destinatario), Some(pedido)) => idioma::plano(destinatario).contains(pedido),
+        _ => false,
+    }
+}
+
+/// Elige los mensajes que mejor sirven de ejemplo, entre los que se pueden
+/// mostrar. Los del grupo de la conversación que pregunta van siempre antes
+/// que los de otros, que solo completan si faltan. Dentro de cada parte:
+/// primero lo que habla de lo mismo, y entre iguales lo más nuevo.
 fn elegir<'a>(mensajes: &'a [Mensaje], p: &Pedido<'_>, idioma: &str, cuantos: usize) -> Vec<&'a Mensaje> {
-    let para = p.para.map(idioma::plano).filter(|t| !t.trim().is_empty());
+    let para = p.para.map(|t| idioma::plano(t.trim())).filter(|t| !t.is_empty());
     let sobre = p.sobre.map(texto::Consulta::de);
     let mut candidatos: Vec<(bool, usize, usize, &Mensaje)> = mensajes
         .iter()
         .enumerate()
         .filter(|(_, m)| m.idioma == idioma && sirve_de_ejemplo(&m.contenido))
+        .filter(|(_, m)| se_puede_mostrar(m, para.as_deref()))
         .map(|(orden, m)| {
             let mut puntos = 0;
-            if let Some(para) = &para
-                && m.para.as_deref().is_some_and(|a| idioma::plano(a).contains(para.trim()))
-            {
-                puntos += 1000;
-            }
             if let Some(sobre) = &sobre {
                 let indexado = texto::para_indexar(&m.contenido);
                 puntos += sobre.coinciden(&texto::conjunto(&indexado));
@@ -422,6 +438,12 @@ pub async fn consultar(pool: &SqlitePool, p: &Pedido<'_>) -> Resultado<String> {
         for (i, m) in elegidos.iter().enumerate() {
             let _ = writeln!(salida, "{}", ejemplo(m, i + 1, p));
         }
+    } else if mensajes.iter().any(|m| m.dirigido) {
+        let _ = writeln!(
+            salida,
+            "\nNo muestro mensajes suyos de ejemplo: lo que le mandó a alguien se ve solo si decís a quién le va a \
+             escribir (`para`: el nombre de la persona o del grupo) y ya le escribió antes."
+        );
     }
     let _ = write!(
         salida,

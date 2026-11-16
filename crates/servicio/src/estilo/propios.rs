@@ -460,6 +460,14 @@ fn parece_escrito(texto: &str) -> bool {
     letras * 100 >= visibles * LETRAS_MINIMAS
 }
 
+/// De un mensaje que mandó el usuario (`nombre`) por cualquier fuente, lo que
+/// es claramente suyo y parece escrito a mano. `None` si no queda nada.
+#[must_use]
+pub fn lo_propio(texto: &str, nombre: &str) -> Option<String> {
+    let propio = ordenar(&solo_lo_propio(texto, nombre));
+    parece_escrito(&propio).then_some(propio)
+}
+
 /// Si el archivo dice que el renglón lo escribió una persona. Los avisos de
 /// tareas, los mensajes de otras conversaciones y los de los agregados de la
 /// app entran como «user» con otro origen, o sin ninguno.
@@ -479,10 +487,7 @@ fn mensaje(v: &Value, mostrado: &Mostrado, nombre: &str) -> Option<Propio> {
     if texto.is_empty() || mostrado.botones.contains(texto) || DE_LA_APP.iter().any(|d| texto.starts_with(d)) {
         return None;
     }
-    let propio = ordenar(&solo_lo_propio(&quitar_citas(texto, mostrado), nombre));
-    if !parece_escrito(&propio) {
-        return None;
-    }
+    let propio = lo_propio(&quitar_citas(texto, mostrado), nombre)?;
     let fecha = v["timestamp"].as_str().and_then(|t| DateTime::parse_from_rfc3339(t).ok())?.to_utc();
     Some(Propio { texto: propio, fecha })
 }

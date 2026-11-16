@@ -1,0 +1,2 @@
+# Nombres propios que van en los comentarios tal cual, sin marcarlos como código.
+doc-valid-idents = ["WhatsApp", ".."]

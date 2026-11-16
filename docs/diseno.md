@@ -452,14 +452,24 @@ Aprende de las conversaciones con Claude, que el servicio ya leía. Todo queda e
 - **Los ejemplos pueden aparecer en otra conversación**, así que se eligen con más cuidado que lo que se mide: una frase corrida y corta, sin direcciones, sin nada tapado y sin nada que parezca un dato (una cuenta, un teléfono, una clave escrita al pasar). Los del grupo de la conversación que pregunta van siempre primero; los de otro grupo solo completan si faltan y dicen de cuál son.
 - **Si no alcanza:** de un lugar del que no hay mensajes usa lo que tiene y avisa que las tildes y los saludos pueden ser otros ahí; con menos de cinco mensajes en un idioma no arma perfil; con menos de treinta avisa que es una pista.
 
-#### Lo que falta (propuesta, sin acordar)
+#### Segunda parte: WhatsApp, hecha en la 0.8 (16/11/2026)
 
-Los chats con Claude muestran cómo escribe el usuario cuando escribe rápido. Para un mensaje o un correo hacen falta las fuentes donde escribe esos mensajes.
+Los chats con Claude muestran cómo escribe el usuario cuando escribe rápido. Para un mensaje hace falta aprender de sus mensajes. WhatsApp es la primera fuente optativa; el usuario la eligió primero.
+
+- **Apagada por defecto.** Se enciende con `MEMORIA_FUENTES=whatsapp` (queda en `ajustes`); `MEMORIA_WHATSAPP_SIN` deja afuera los chats que tengan esos textos en el nombre.
+- **Quién lee, y por qué no el servicio.** macOS protege los datos de las otras aplicaciones: el primer acceso a la carpeta de WhatsApp queda frenado hasta que el usuario contesta un cartel («… quiere acceder a datos de otras apps»), y el permiso es de quien pregunta. El servicio corre de fondo y su programa cambia con cada versión y con cada mejora automática, así que el permiso se volvería a pedir cada vez. Claude Code tiene una identidad fija: el permiso se da una vez. Por eso lee `memoria juntar`, un programa de un solo uso que corre el mod (`$.process.run`) desde Claude Code. El servicio no abre nunca esa carpeta.
+- **Cuándo.** El servicio lleva la cuenta en `ajustes` (`juntada`) y le avisa al mod, por el mismo canal de siempre (`memoria_mejora_estado` con `sesion`, campo `juntar`), qué programa correr: cada 6 horas si la última vez anduvo, y una vez por día si no, para no insistir con un permiso que todavía no se dio. El programa anota que empezó antes de leer, así que dos conversaciones que lo piden a la vez no leen las dos. El mod solo corre un programa que se llame `memoria` y venga con su ruta completa.
+- **Qué lee** (`estilo/whatsapp.rs`): una copia de `ChatStorage.sqlite` (con sus archivos `-wal` y `-shm`), en una carpeta propia que se borra al terminar. De ahí, los mensajes de texto que mandó el usuario en chats con personas y en grupos. Quedan afuera los estados, las listas de difusión y los canales, lo que no es texto, los chats excluidos y lo reenviado: un texto de 20 letras o más que había recibido antes palabra por palabra. Cada mensaje pasa por el mismo filtro que los de Claude (lo pegado de otra persona, los datos, los secretos).
+- **Qué guarda de cada chat:** el nombre con que el usuario lo tiene agendado y una marca hecha con su nombre interno. El nombre interno trae el número de teléfono y no se guarda; un contacto sin agendar figura con su número, así que queda sin nombre.
+- **Los ejemplos de una mensajería son de su charla.** Lo que el usuario le mandó a alguien se mide siempre, pero se muestra como ejemplo solo cuando quien pregunta dice a quién le va a escribir (`para`) y ese chat existe. Sin eso, `memoria_estilo` devuelve lo medido y avisa por qué no muestra mensajes.
+- **Sin comprobar todavía con datos reales:** la forma de la base se tomó de la herramienta de lectura que el usuario ya usa en la misma máquina y se probó contra una base de mentira con esas tablas. El acceso real necesita el permiso del sistema, que solo puede dar el usuario frente a la máquina. Falta ver ahí si alcanza con reconocer lo reenviado por el texto, o si hay que leer la marca que guarda la aplicación.
+
+#### Lo que falta (propuesta, sin acordar)
 
 - **Se elige al instalar:** el instalador pregunta qué fuentes conectar, una por una, y solo lee las que se aceptan. Queda anotado en la configuración y se cambia corriendo el instalador de nuevo.
 - **Qué se junta, cada día:** solo los mensajes que escribió el usuario, nunca los de los demás.
   - Chats con Claude: hecho.
-  - WhatsApp: de la base local de WhatsApp Desktop (`ChatStorage.sqlite`), sobre una copia y en solo lectura, como hace la herramienta `whatsapp-leer`.
+  - WhatsApp: hecho (ver arriba).
   - Slack: los espacios que ya tienen conector en esta Mac.
   - Mails enviados (sugerencia): es la mejor fuente para aprender cómo escribe los mails.
 - **Qué se guarda:**
@@ -467,7 +477,7 @@ Los chats con Claude muestran cómo escribe el usuario cuando escribe rápido. P
   - Un perfil por lugar e idioma, con dos partes: los números que calcula el programa (largo, signos, mayúsculas, acentos, emojis, saludos y despedidas, muletillas, mezcla de idiomas) y una descripción corta que escribe el modelo local de noche.
 - **Privacidad:** todo queda en la Mac.
 - **La descripción en palabras** (más allá de los números) la podría escribir un agente lanzado por el mod dentro de una conversación, como el de las mejoras (4.8), sin llave. Ese agente no necesitaría ninguna herramienta: recibe una muestra y devuelve un texto.
-- **Preguntas abiertas:** si dentro de una fuente se dejan afuera algunas conversaciones (por ejemplo, chats de familia); cómo se lee Slack sin duplicar las claves que hoy tienen los conectores locales; si el servicio, que corre de fondo, puede leer la base de otra aplicación sin que el sistema lo frene; y cómo se guarda a quién le escribía sin juntar datos de terceros.
+- **Preguntas abiertas:** cómo se lee Slack sin duplicar las claves que hoy tienen los conectores locales, y de dónde se lee el correo enviado. Las otras tres quedaron contestadas con WhatsApp: los chats se dejan afuera por nombre, el servicio no puede leer los datos de otra aplicación sin que el sistema lo frene (lee Claude Code), y de quien recibe se guarda el nombre y no el número.
 
 ### 4.12 Versión 0.4: un archivo y un modelo adentro (13/11/2026)
 
@@ -526,7 +536,7 @@ Se midieron cuatro opciones con las mismas notas y preguntas (las de la batería
 | 3. Mejoras | Señales; `reportar` y `mejorar`; guardián; batería inicial; agente; aviso y reintento en el chat | Una falla provocada se reporta, se acepta, se instala y el chat retoma solo; y una mejora que rompe la batería se rechaza y todo queda como estaba |
 | 4. Lo viejo | Extracción nocturna con el modelo local; recorrido del historial grupo por grupo | El historial de ACME queda procesado y las notas resultantes pasan la batería |
 | 5. Después | La regla de grupos pasa al servicio (hecho en la 0.5); gancho de inicio para la terminal; preparar el paso a un servidor | Según se necesite |
-| 6. Estilo | Mensajes propios de los chats con Claude; perfil por lugar e idioma; `memoria_estilo` (hecho en la 0.7). Falta: WhatsApp, Slack y correo, cada uno optativo | Claude redacta un mensaje de WhatsApp y un mail que suenan al usuario usando el perfil |
+| 6. Estilo | Mensajes propios de los chats con Claude; perfil por lugar e idioma; `memoria_estilo` (0.7). WhatsApp como fuente optativa (0.8). Falta: Slack y correo, cada uno optativo | Claude redacta un mensaje de WhatsApp y un mail que suenan al usuario usando el perfil |
 
 Hechas: la 1 (12/11/2026) y la 2 (13/11/2026). La 3 está construida, instalada y ensayada con un agente de mentira (13/11/2026); desde el 14/11/2026 el agente corre dentro de la conversación de Claude, sin llave (4.8), y el 16/11/2026 se instalaron solas las dos primeras mejoras reales. De la 6, la primera parte (aprender de los chats con Claude) está en la 0.7 (16/11/2026). El 13/11/2026, además, la versión 0.4 sacó a Postgres y a Ollama de lo que hace falta para instalarla, y el 14/11/2026 la 0.5 sacó los nombres propios y dejó una regla de grupos general (4.12).
 

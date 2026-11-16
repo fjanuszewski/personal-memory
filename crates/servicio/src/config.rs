@@ -18,6 +18,32 @@ pub enum Proveedor {
     Ollama,
 }
 
+/// WhatsApp como fuente para aprender cómo escribe el usuario.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WhatsApp {
+    /// La base de WhatsApp Desktop (`MEMORIA_WHATSAPP`; por defecto, donde la
+    /// deja la aplicación).
+    pub base: PathBuf,
+    /// Chats que quedan afuera: los que tienen alguno de estos textos en el
+    /// nombre (`MEMORIA_WHATSAPP_SIN`, separados por punto y coma).
+    pub sin: Vec<String>,
+}
+
+/// De dónde más, aparte de las conversaciones con Claude, se aprende cómo
+/// escribe el usuario. Cada fuente se enciende aparte; apagada, no se lee.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Fuentes {
+    pub whatsapp: Option<WhatsApp>,
+}
+
+impl Fuentes {
+    /// Si hay alguna fuente encendida.
+    #[must_use]
+    pub const fn alguna(&self) -> bool {
+        self.whatsapp.is_some()
+    }
+}
+
 /// Dónde vive cada cosa.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -55,6 +81,9 @@ pub struct Config {
     /// Carpeta donde Claude Code guarda las conversaciones
     /// (`MEMORIA_CONVERSACIONES`, por defecto `~/.claude/projects`).
     pub conversaciones: PathBuf,
+    /// Las fuentes encendidas (`MEMORIA_FUENTES`, separadas por coma; hoy
+    /// solo `whatsapp`). Por defecto, ninguna.
+    pub fuentes: Fuentes,
 }
 
 const DIRECCION: &str = "127.0.0.1:7337";
@@ -63,6 +92,32 @@ const OLLAMA: &str = "http://127.0.0.1:11434";
 const MODELO_INTERNO: &str = "gemma";
 const MODELO_DE_OLLAMA: &str = "bge-m3";
 const HILOS_MAXIMOS: usize = 8;
+const BASE_DE_WHATSAPP: &str = "Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite";
+
+/// Lee `MEMORIA_FUENTES` («whatsapp», o «ninguna») y arma cada fuente
+/// encendida con lo suyo: dónde está la base de WhatsApp (`base`, o la de
+/// siempre dentro de `casa`) y qué chats quedan afuera (`sin`).
+fn leer_fuentes(texto: Option<&str>, casa: &Path, base: Option<&str>, sin: Option<&str>) -> anyhow::Result<Fuentes> {
+    let mut fuentes = Fuentes::default();
+    for nombre in texto.unwrap_or_default().split(',').map(|n| n.trim().to_lowercase()).filter(|n| !n.is_empty()) {
+        match nombre.as_str() {
+            "ninguna" => return Ok(Fuentes::default()),
+            "whatsapp" => {
+                fuentes.whatsapp = Some(WhatsApp {
+                    base: base.map_or_else(|| casa.join(BASE_DE_WHATSAPP), PathBuf::from),
+                    sin: sin
+                        .unwrap_or_default()
+                        .split(';')
+                        .map(|chat| chat.trim().to_owned())
+                        .filter(|chat| !chat.is_empty())
+                        .collect(),
+                });
+            }
+            otra => bail!("MEMORIA_FUENTES: no conozco la fuente «{otra}»; hoy la única es «whatsapp»"),
+        }
+    }
+    Ok(fuentes)
+}
 
 /// Lee el archivo de ajustes (`<carpeta>/ajustes`): renglones `NOMBRE=valor`
 /// con las mismas variables `MEMORIA_…` que se pueden poner en el entorno.
@@ -142,6 +197,12 @@ impl Config {
             hilos,
             umbrales: var("MEMORIA_UMBRALES").as_deref().map(leer_umbrales).transpose()?,
             conversaciones: var("MEMORIA_CONVERSACIONES").map_or_else(|| casa.join(".claude/projects"), PathBuf::from),
+            fuentes: leer_fuentes(
+                var("MEMORIA_FUENTES").as_deref(),
+                &casa,
+                var("MEMORIA_WHATSAPP").as_deref(),
+                var("MEMORIA_WHATSAPP_SIN").as_deref(),
+            )?,
             dir,
         })
     }
@@ -175,6 +236,23 @@ mod pruebas {
         assert_eq!(ajustes.get("MEMORIA_MODELO_HUELLAS").map(String::as_str), Some("bge-m3"));
         assert_eq!(ajustes.len(), 2, "solo las variables de la memoria que traen valor: {ajustes:?}");
         assert!(leer_ajustes(Path::new("/no/existe")).is_empty());
+    }
+
+    #[test]
+    fn las_fuentes_se_encienden_una_por_una() {
+        let casa = Path::new("/Users/ana");
+        assert_eq!(leer_fuentes(None, casa, None, None).unwrap(), Fuentes::default());
+        assert!(!Fuentes::default().alguna());
+        let encendida = leer_fuentes(Some(" WhatsApp "), casa, None, Some("Familia; Los del colegio ;;")).unwrap();
+        let whatsapp = encendida.whatsapp.clone().unwrap();
+        assert!(encendida.alguna());
+        assert!(whatsapp.base.starts_with("/Users/ana/Library/Group Containers"), "{}", whatsapp.base.display());
+        assert_eq!(whatsapp.sin, vec!["Familia", "Los del colegio"]);
+        let en_otro_lado = leer_fuentes(Some("whatsapp"), casa, Some("/tmp/copia.sqlite"), None).unwrap();
+        assert_eq!(en_otro_lado.whatsapp.unwrap().base, Path::new("/tmp/copia.sqlite"));
+        // «ninguna» las apaga todas, y una fuente desconocida no pasa de largo.
+        assert_eq!(leer_fuentes(Some("whatsapp, ninguna"), casa, None, None).unwrap(), Fuentes::default());
+        assert!(leer_fuentes(Some("telegrama"), casa, None, None).is_err());
     }
 
     #[test]

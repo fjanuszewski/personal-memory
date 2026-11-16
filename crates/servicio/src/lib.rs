@@ -160,6 +160,23 @@ async fn preparar_huellas(cfg: &Config) -> anyhow::Result<String> {
     }
 }
 
+/// Lee las fuentes encendidas (hoy, WhatsApp) y guarda lo que el usuario
+/// escribió en ellas. Es lo que corre `memoria juntar`: lo lanza el mod desde
+/// Claude Code, no el servicio. Devuelve si anduvo y qué pasó.
+pub async fn juntar(cfg: &Config, modo: estilo::fuentes::Modo) -> anyhow::Result<(bool, String)> {
+    let pool = base::abrir(&cfg.bd).await?;
+    let lista: i64 = sqlx::query_scalar("select count(*) from sqlite_master where name = 'mensajes_propios'")
+        .fetch_one(&pool)
+        .await?;
+    let resultado = if lista == 0 {
+        Ok((false, "La base todavía no está lista: tiene que arrancar el servicio primero.".to_owned()))
+    } else {
+        estilo::fuentes::juntar(&pool, &cfg.fuentes, &cfg.nombre, modo).await
+    };
+    pool.close().await;
+    resultado
+}
+
 /// Arranca todo y atiende hasta que llegue la señal de apagado.
 pub async fn arrancar(cfg: Config) -> anyhow::Result<()> {
     let clave = clave::cargar_o_crear(&cfg.archivo_clave())?;
@@ -173,6 +190,7 @@ pub async fn arrancar(cfg: Config) -> anyhow::Result<()> {
         estado.umbrales = umbrales;
     }
     estado.nombre = Arc::from(cfg.nombre.as_str());
+    estado.fuentes = Arc::new(cfg.fuentes.clone());
     let (notas, fragmentos) = huellas::cargar(&pool, &estado.indice).await?;
     tracing::info!(notas, fragmentos, "huellas cargadas en memoria");
 

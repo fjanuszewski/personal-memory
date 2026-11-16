@@ -210,6 +210,7 @@ fn config_de_prueba(base: &comun::Base) -> Config {
         hilos: 1,
         umbrales: None,
         conversaciones: std::env::temp_dir().join("memoria-sin-conversaciones"),
+        fuentes: memoria::config::Fuentes::default(),
     }
 }
 

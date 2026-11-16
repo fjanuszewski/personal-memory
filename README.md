@@ -2,7 +2,7 @@
 
 Memoria a largo plazo por grupo (empresa › proyecto, como ACME › Portal) para las conversaciones con Claude. Corre de fondo en tu Mac, guarda decisiones, errores resueltos, cambios, acuerdos con el cliente y pendientes en un archivo propio, y Claude la consulta y la completa sola en cada conversación. El diseño completo está en [docs/diseno.md](docs/diseno.md).
 
-**Estado:** versión 0.7. Busca por palabras y por significado, une las notas repetidas, lleva la cuenta de qué nota reemplazó a cuál, lee lo conversado, cuando falla se puede arreglar sola si el usuario acepta, y aprende cómo escribe quien la usa para que Claude redacte en su nombre con su estilo. El recorrido del historial viejo (etapa 4) todavía no está.
+**Estado:** versión 0.8. Busca por palabras y por significado, une las notas repetidas, lleva la cuenta de qué nota reemplazó a cuál, lee lo conversado, cuando falla se puede arreglar sola si el usuario acepta, y aprende cómo escribe quien la usa para que Claude redacte en su nombre con su estilo. El recorrido del historial viejo (etapa 4) todavía no está.
 
 **No necesita nada instalado aparte.** Desde la versión 0.4 la base es un solo archivo (`~/.memoria/memoria.db`, SQLite) y el modelo que calcula las huellas de significado corre dentro del servicio. Ya no hacen falta Postgres ni Ollama (Ollama queda como opción para quien lo prefiera).
 
@@ -83,7 +83,22 @@ Cada mejora parte del commit de git del que salió lo instalado (`~/.memoria/ins
 
 Para que un mensaje o un correo redactado por Claude suene a vos y no a Claude. La memoria junta **solo lo que escribiste vos**, mide cómo lo escribís y se lo cuenta a Claude cuando tiene que redactar algo en tu nombre. No hay ningún modelo de por medio y nada sale de tu máquina: son cuentas sobre tus propios mensajes, guardados en la misma base.
 
-**De dónde aprende.** Por ahora, de tus conversaciones con Claude (las que el servicio ya lee). El servicio las repasa solo, de fondo, y la primera vez recorre también lo anterior. Otras fuentes (mensajería, correo) van a ser siempre optativas: cada una se enciende aparte.
+**De dónde aprende.** De tus conversaciones con Claude (las que el servicio ya lee): las repasa solo, de fondo, y la primera vez recorre también lo anterior. Y, si la encendés, de WhatsApp. Las fuentes que no son Claude son siempre optativas: cada una se enciende aparte y, apagada, no se lee.
+
+**WhatsApp (optativa).** A Claude le escribís rápido; para que un mensaje suene a vos tiene que aprender de tus mensajes. Se enciende al instalar:
+
+```bash
+MEMORIA_FUENTES=whatsapp instalacion/instalar.sh
+# dejando afuera los chats que tengan estos textos en el nombre:
+MEMORIA_FUENTES=whatsapp MEMORIA_WHATSAPP_SIN="Familia;Los del colegio" instalacion/instalar.sh
+```
+
+- Lee la base local de WhatsApp Desktop, siempre sobre una copia que vive unos segundos y se borra. La base de la aplicación no se abre ni se toca.
+- Entran solo los mensajes de texto que mandaste vos, en chats con personas y en grupos. No entran los de los demás, las fotos ni los audios, los estados, los canales, lo que reenviaste (lo que habías recibido antes palabra por palabra) ni los chats que dejaste afuera.
+- De cada chat queda su nombre y una marca. Los números de teléfono no se guardan: un contacto sin agendar queda sin nombre.
+- **macOS te va a preguntar una vez** si dejás que Claude Code vea los datos de otras aplicaciones. Por eso no lo lee el servicio, que corre de fondo, sino el mod: cuando toca (cada unas horas, al abrir una conversación) corre `memoria juntar` desde Claude Code. Si decís que no, o no contestás, no insiste hasta el otro día.
+- Lo que le mandaste a alguien se usa para medir, pero **como ejemplo se muestra solo cuando Claude dice a quién le vas a escribir** y ya le habías escrito: nunca aparecen mensajes de un chat en otro.
+- Para ver qué entraría sin guardar nada: `~/.memoria/bin/memoria juntar --probar`. Para apagarla: `MEMORIA_FUENTES=ninguna instalacion/instalar.sh`.
 
 **Qué deja afuera.** En una conversación con Claude no todo lo que figura como tuyo lo escribiste vos, así que se queda nada más con lo que es claramente tuyo y, ante la duda, corta:
 

@@ -35,6 +35,11 @@
 # Para que lo conversado quede guardado con tu nombre en vez de «Usuario»:
 #   MEMORIA_NOMBRE=Ana instalacion/instalar.sh
 #
+# Para que aprenda cómo escribís también de WhatsApp Desktop (apagado si no
+# se pide; se recuerda para la próxima vez, y «ninguna» lo apaga):
+#   MEMORIA_FUENTES=whatsapp instalacion/instalar.sh
+#   MEMORIA_FUENTES=whatsapp MEMORIA_WHATSAPP_SIN="Familia;Los del colegio" instalacion/instalar.sh
+#
 # Para elegir cómo se calculan las huellas (se recuerda para la próxima vez):
 #   MEMORIA_MODELO_HUELLAS=e5-small instalacion/instalar.sh   # otro modelo interno
 #   MEMORIA_HUELLAS=ollama instalacion/instalar.sh            # con Ollama (bge-m3)
@@ -149,7 +154,8 @@ paso "Ajustes"
 AJUSTES="$DIR/ajustes"
 touch "$AJUSTES"
 chmod 600 "$AJUSTES"
-for NOMBRE in MEMORIA_NOMBRE MEMORIA_HUELLAS MEMORIA_MODELO_HUELLAS MEMORIA_OLLAMA MEMORIA_HILOS MEMORIA_UMBRALES; do
+for NOMBRE in MEMORIA_NOMBRE MEMORIA_HUELLAS MEMORIA_MODELO_HUELLAS MEMORIA_OLLAMA MEMORIA_HILOS MEMORIA_UMBRALES \
+              MEMORIA_FUENTES MEMORIA_WHATSAPP MEMORIA_WHATSAPP_SIN; do
   VALOR="${(P)NOMBRE:-}"
   if [[ -n "$VALOR" ]]; then
     grep -v "^$NOMBRE=" "$AJUSTES" > "$AJUSTES.nuevo" || true

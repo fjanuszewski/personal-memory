@@ -3,6 +3,7 @@ import type { On, PromptComposeInput, PromptComposeResult, PromptSubmitInput } f
 
 import { aEncargo, enRegla, normalizar, revisar } from '../hooks/agente'
 import { grupoDelResumen, provisorio } from '../hooks/grupos'
+import { programaParaJuntar } from '../hooks/mejoras'
 import type { AgenteLanzado } from '../types'
 
 type Llamada = { server: string; tool: string; args: Record<string, unknown> }
@@ -70,6 +71,8 @@ type Mejoras = {
   noLanza?: string
   /** Si Claude no acepta el tipo de agente, con qué motivo. */
   noRegistra?: string
+  /** Lo que el servicio manda cuando toca leer las fuentes encendidas; lo deja de mandar cuando el programa corrió. */
+  juntar?: unknown
 }
 
 type Lanzado = { prompt: string; description?: string; subagentType?: string; cwd?: string }
@@ -95,6 +98,8 @@ type Visto = {
   consultados: string[]
   /** Los agentes que el mod detuvo. */
   frenados: string[]
+  /** Los programas que el mod corrió, con sus argumentos y cuánto les dio. */
+  programas: { argv: readonly string[]; timeoutMs?: number }[]
 }
 
 // Un mensaje con este texto no entra (como si otro gancho lo rechazara).
@@ -113,6 +118,7 @@ function mundo(on: On, o: Mundo = {}): Visto {
     corridas: [],
     consultados: [],
     frenados: [],
+    programas: [],
   }
   let fallas = o.fallasMemoria ?? 0
   let fallasApp = o.fallasApp ?? 0
@@ -156,6 +162,21 @@ function mundo(on: On, o: Mundo = {}): Visto {
     return { value: { agent: `memoria:${e.name}` } }
   })
   on('agent.offer', () => ({ isOffered: true }))
+  // El programa que lee las fuentes: al correr anota la juntada, y el servicio deja de pedirla.
+  on('process.run', (_, e) => {
+    visto.programas.push({ argv: e.argv, timeoutMs: e.init?.timeoutMs })
+    if (o.mejoras) o.mejoras.juntar = null
+
+    return {
+      value: {
+        exitCode: 0,
+        stdout: 'WhatsApp: 3 mensajes nuevos.',
+        stderr: '',
+        isStdoutTruncated: false,
+        isStderrTruncated: false,
+      },
+    }
+  })
   on('agent.list', () => ({ value: visto.enLaApp as never }))
   // Lo que lanza un mod llega acá como lo recibe la herramienta de agentes
   // de Claude. El id lo pone la app de verdad: en una prueba no vuelve con
@@ -262,6 +283,7 @@ function mundo(on: On, o: Mundo = {}): Visto {
           para_agente: mejoras.paraAgente ?? [],
           con_agente: mejoras.conAgente ?? [],
           paso: valio,
+          juntar: mejoras.juntar ?? null,
         }),
       )
     }
@@ -657,6 +679,39 @@ test('un aviso pendiente aparece al volver a abrir la conversación, una sola ve
   await clock.advance(30_000)
   expect(visto.avisos.length).toBe(1)
   expect(visto.retomados.length).toBe(1)
+})
+
+test('cuando el servicio avisa que toca leer las fuentes, corre el programa una sola vez', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-16T15:00:00.000Z') })
+  const mejoras: Mejoras = { enCurso: [], avisos: [], juntar: '/Users/ana/.memoria/bin/memoria' }
+  const visto = mundo(on, { mejoras })
+
+  await $.session.start(INICIO)
+  await clock.settle()
+  expect(visto.programas).toEqual([{ argv: ['/Users/ana/.memoria/bin/memoria', 'juntar'], timeoutMs: 120_000 }])
+  // No deja nada en el chat ni le pide nada a Claude: corre por detrás.
+  expect(visto.avisos).toEqual([])
+  expect(visto.retomados).toEqual([])
+
+  // El servicio ya no lo pide: al recargarse el mod no lo corre de nuevo.
+  await $.session.start(INICIO)
+  await clock.settle()
+  expect(visto.programas.length).toBe(1)
+})
+
+test('no corre nada que no sea el programa de la memoria', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-16T15:00:00.000Z') })
+  const mejoras: Mejoras = { enCurso: [], avisos: [], juntar: '/bin/sh' }
+  const visto = mundo(on, { mejoras })
+  await $.session.start(INICIO)
+  await clock.settle()
+  expect(visto.programas).toEqual([])
+
+  expect(programaParaJuntar('/Users/ana/.memoria/bin/memoria')).toBe('/Users/ana/.memoria/bin/memoria')
+  expect(programaParaJuntar('/Users/ana/Mis cosas/.memoria/bin/memoria')).toBe('/Users/ana/Mis cosas/.memoria/bin/memoria')
+  for (const malo of ['memoria', 'bin/memoria', '/Users/ana/../otro/memoria', '/tmp/./memoria', '/bin/sh', '/x/memoria ', '', null, 7, { programa: '/x/memoria' }]) {
+    expect(programaParaJuntar(malo)).toBe(null)
+  }
 })
 
 test('el nombre provisorio y el que informa el servicio', () => {
