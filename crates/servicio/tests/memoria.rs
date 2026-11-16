@@ -321,13 +321,13 @@ async fn el_resumen_no_pasa_de_treinta_lineas() {
     let pool = base.pool.clone();
     let e = estado(pool.clone()).await;
     empezar(&e, "local_a", "ACME", Some("Portal")).await;
-    empezar(&e, "local_tcp", "ACME", None).await;
+    empezar(&e, "local_acme", "ACME", None).await;
     for i in 0..12 {
         for tipo in TipoNota::TODOS {
             mcp::guardar(&e, nota(tipo, &format!("{tipo} {i}"), &format!("Cuerpo {i}."), "local_a")).await.unwrap();
         }
     }
-    mcp::guardar(&e, nota(TipoNota::Decision, "Regla de ACME", "Vale para toda ACME.", "local_tcp")).await.unwrap();
+    mcp::guardar(&e, nota(TipoNota::Decision, "Regla de ACME", "Vale para toda ACME.", "local_acme")).await.unwrap();
     let r = empezar(&e, "local_a", "ACME", Some("Portal")).await;
     let lineas = r.lines().count();
     assert!(lineas <= 30, "{lineas} líneas:\n{r}");

@@ -90,7 +90,7 @@ async fn una_palabra_suelta_no_alcanza() {
     let pool = base.pool.clone();
     let e = estado(pool.clone()).await;
     empezar(&e, "local_a", "ACME", Some("Portal")).await;
-    empezar(&e, "local_tcp", "ACME", None).await;
+    empezar(&e, "local_acme", "ACME", None).await;
     // En el grupo hay tres notas que con la consulta solo comparten «exportar».
     for cosa in ["turnos", "reportes", "usuarios"] {
         let titulo = format!("Exportar {cosa} a Excel");
@@ -100,7 +100,7 @@ async fn una_palabra_suelta_no_alcanza() {
     // La que responde de verdad está guardada para toda la empresa.
     mcp::guardar(
         &e,
-        nota(TipoNota::Decision, "Formato de las facturas", "Las facturas se exportan en PDF firmado.", "local_tcp"),
+        nota(TipoNota::Decision, "Formato de las facturas", "Las facturas se exportan en PDF firmado.", "local_acme"),
     )
     .await
     .unwrap();
@@ -537,6 +537,73 @@ async fn con_el_modelo_interno_los_correos_encuentran_la_cuenta_de_sendgrid() {
         assert!(primera.starts_with("1. [nota 2] acuerdo · vigente"), "«{consulta}»: {r}");
         assert!(!primera.contains("coincide solo en parte"), "«{consulta}»: {r}");
     }
+}
+
+/// La falla de la mejora 2: una pregunta que no tiene nada que ver con lo
+/// guardado traía, al ampliar a la empresa y a todo, notas de otros grupos
+/// que con ella solo comparten una palabra suelta («podemos», «podía» y
+/// «podar» se reducen a la misma raíz). Lo de otros grupos completa los
+/// resultados solo si tiene al menos dos de las palabras buscadas.
+#[tokio::test]
+async fn una_palabra_suelta_de_otro_grupo_no_completa_los_resultados() {
+    let base = comun::Base::nueva().await;
+    let e = estado(base.pool.clone()).await;
+    empezar(&e, "local_p", "Otras", Some("Personal")).await;
+    empezar(&e, "local_m", "Otras", Some("Memoria")).await;
+    empezar(&e, "local_a", "ACME", Some("Portal")).await;
+    empezar(&e, "local_acme", "ACME", None).await;
+    let notas = [
+        (
+            TipoNota::Decision,
+            "El guardián prueba cada mejora antes de instalarla",
+            "Qué: el guardián compila, corre las pruebas y la batería, y recién después instala. Por qué: así podemos \
+             volver al programa anterior si el servicio no queda sano. Cómo: guarda el programa viejo al lado y vigila \
+             30 segundos después de reiniciar.",
+            "local_m",
+        ),
+        (
+            TipoNota::Error,
+            "Los reportes largos cortaban la conexión",
+            "Error: el usuario no podía esperar el reporte mensual y el navegador cortaba a los 30 segundos. Causa: se \
+             armaba en el mismo pedido. Solución: armarlo de fondo y avisar por mail cuando está listo.",
+            "local_a",
+        ),
+        (
+            TipoNota::Decision,
+            "Las ramas se llaman con el número de ticket",
+            "Qué: cada rama de git lleva el número del ticket adelante. Por qué: para enlazarla sola con el tablero.",
+            "local_acme",
+        ),
+    ];
+    for (tipo, titulo, cuerpo, sesion) in notas {
+        mcp::guardar(&e, nota(tipo, titulo, cuerpo, sesion)).await.unwrap();
+    }
+
+    // Ni lo de la empresa ni lo de afuera hablan de rosales: no aparece nada.
+    let r = mcp::buscar(&e, &solo_notas("cómo podar un rosal", "local_p")).await.unwrap();
+    assert!(r.starts_with("Nada para «cómo podar un rosal» en Otras › "), "{r}");
+    assert!(r.contains("(había pocos: amplié a Otras y a todo)"), "{r}");
+    // Tampoco buscando en todo, sin grupo.
+    let mut en_todo = solo_notas("cómo podar un rosal", "local_p");
+    en_todo.sesion = None;
+    let r = mcp::buscar(&e, &en_todo).await.unwrap();
+    assert!(r.starts_with("Nada para «cómo podar un rosal» en todo"), "{r}");
+
+    // Una nota de otro grupo con dos de las tres palabras buscadas sigue
+    // completando, marcada como parcial.
+    let r = mcp::buscar(&e, &solo_notas("cómo se nombran las ramas de git", "local_p")).await.unwrap();
+    assert!(r.starts_with("1 resultado para «cómo se nombran las ramas de git»"), "{r}");
+    let primera = r.lines().nth(1).unwrap_or_default();
+    assert!(primera.starts_with("1. [nota 3] decisión · vigente") && primera.contains("· de ACME"), "{r}");
+    assert!(primera.contains("coincide solo en parte"), "{r}");
+
+    // Y dentro del grupo de la conversación una sola palabra sigue alcanzando para completar.
+    let r = mcp::buscar(&e, &solo_notas("cómo podar un rosal", "local_m")).await.unwrap();
+    assert!(r.starts_with("1 resultado para «cómo podar un rosal» en Otras › Memoria"), "{r}");
+    assert!(
+        r.lines().nth(1).is_some_and(|l| l.starts_with("1. [nota 1] ") && l.contains("coincide solo en parte")),
+        "{r}"
+    );
 }
 
 /// Lo que tiene que pasar con cualquier modelo de huellas que se ofrezca:

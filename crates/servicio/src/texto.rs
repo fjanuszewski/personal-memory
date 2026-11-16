@@ -243,6 +243,23 @@ impl Consulta {
         self.total() > 0 && self.coinciden(raices) >= self.necesarias()
     }
 
+    /// Cuántas palabras de la consulta tiene que tener una nota de otro
+    /// grupo para completar los resultados cuando no hay nada mejor: la
+    /// mitad, y nunca una sola. En toda la base siempre hay alguna nota que
+    /// comparte una palabra suelta con cualquier pregunta («podemos» y
+    /// «podar» dan la misma raíz), y eso no dice que hable de lo mismo.
+    #[must_use]
+    pub fn para_completar(&self) -> usize {
+        self.total().div_ceil(2).max(2)
+    }
+
+    /// Si un texto de otro grupo (sus raíces) tiene suficientes palabras de
+    /// la consulta para completar los resultados.
+    #[must_use]
+    pub fn completa(&self, raices: &HashSet<&str>) -> bool {
+        self.coinciden(raices) >= self.para_completar()
+    }
+
     /// La consulta para el índice de palabras de SQLite: con `todas`, textos
     /// que tengan todas las palabras; si no, alguna. `None` si no quedó nada
     /// que buscar.
@@ -439,6 +456,25 @@ mod pruebas {
         for (total, esperadas) in pares {
             assert_eq!(de(total), esperadas, "de {total}");
         }
+    }
+
+    #[test]
+    fn una_palabra_suelta_no_completa_desde_otro_grupo() {
+        let de = |n: usize| Consulta { palabras: (0..n).map(|i| vec![format!("p{i}")]).collect() }.para_completar();
+        let pares = [(1, 2), (2, 2), (3, 2), (4, 2), (5, 3), (6, 3), (10, 5)];
+        for (total, esperadas) in pares {
+            assert_eq!(de(total), esperadas, "de {total}");
+        }
+        // «podemos» y «podar» dan la misma raíz: es una sola palabra de dos.
+        let c = Consulta::de("cómo podar un rosal");
+        assert_eq!(c.total(), 2);
+        let ajena = para_indexar("Así podemos volver al programa anterior");
+        assert_eq!(c.coinciden(&conjunto(&ajena)), 1);
+        assert!(!c.completa(&conjunto(&ajena)));
+        // Con dos de tres palabras sí completa, aunque no llegue a firme.
+        let c = Consulta::de("cómo se nombran las ramas de git");
+        let ramas = para_indexar("Cada rama de git lleva el número del ticket");
+        assert!(c.completa(&conjunto(&ramas)) && !c.firme(&conjunto(&ramas)));
     }
 
     #[test]

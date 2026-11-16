@@ -5,7 +5,11 @@
 //! Una coincidencia es firme si llega por significado o si el texto tiene
 //! (casi) todas las palabras de la consulta. Compartir una palabra suelta no
 //! alcanza: un pedazo de conversación así no se muestra, y una nota solo
-//! aparece, marcada como parcial, cuando no hay nada mejor.
+//! aparece, marcada como parcial, cuando no hay nada mejor. Y eso vale dentro
+//! del grupo de la conversación: una nota de otro grupo completa los
+//! resultados solo si tiene al menos la mitad de las palabras buscadas, y
+//! nunca una sola (entre todo lo guardado siempre hay alguna nota que
+//! comparte una palabra con cualquier pregunta).
 //!
 //! Empieza por el grupo de la conversación y, si hay pocos resultados firmes,
 //! amplía a la empresa y después a todo. Ordena: notas vigentes, pedazos de
@@ -112,6 +116,9 @@ struct Fila {
     fecha: DateTime<Utc>,
     /// Llegó por significado o tiene (casi) todas las palabras de la consulta.
     firme: bool,
+    /// Llegó solo por palabras y con tan pocas de las buscadas que, viniendo
+    /// de otro grupo, no alcanza ni para completar los resultados.
+    suelta: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +129,16 @@ struct Candidato {
     etapa: usize,
     /// Notas reemplazadas que coincidían con la búsqueda y llevaron a esta.
     antes: Vec<i64>,
+}
+
+/// Un paso del alcance, para una de las dos capas.
+#[derive(Clone, Copy, Debug)]
+struct Paso {
+    capa: Capa,
+    /// Qué paso es (0: el primero).
+    etapa: usize,
+    /// Si busca solo dentro del grupo de la conversación.
+    del_grupo: bool,
 }
 
 impl Candidato {
@@ -199,12 +216,16 @@ async fn notas_por_palabras(
     .await?;
     Ok(filas
         .into_iter()
-        .map(|(id, estado_de_nota, reemplazada_por, creada, titulo, cuerpo)| Fila {
-            id,
-            estado: estado(&estado_de_nota),
-            reemplazada_por,
-            fecha: creada,
-            firme: palabras.firme(&conjunto(&titulo).union(&conjunto(&cuerpo)).copied().collect()),
+        .map(|(id, estado_de_nota, reemplazada_por, creada, titulo, cuerpo)| {
+            let raices = conjunto(&titulo).union(&conjunto(&cuerpo)).copied().collect();
+            Fila {
+                id,
+                estado: estado(&estado_de_nota),
+                reemplazada_por,
+                fecha: creada,
+                firme: palabras.firme(&raices),
+                suelta: !palabras.completa(&raices),
+            }
         })
         .collect())
 }
@@ -257,7 +278,15 @@ async fn notas_por_significado(
     let posibles: HashMap<i64, Fila> = filas
         .into_iter()
         .map(|(id, estado_de_nota, reemplazada_por, creada)| {
-            (id, Fila { id, estado: estado(&estado_de_nota), reemplazada_por, fecha: creada, firme: true })
+            let fila = Fila {
+                id,
+                estado: estado(&estado_de_nota),
+                reemplazada_por,
+                fecha: creada,
+                firme: true,
+                suelta: false,
+            };
+            (id, fila)
         })
         .collect();
     Ok(cercanas(indice, Huellas::Notas, huellas, &|d| posibles.contains_key(&d.id))
@@ -324,7 +353,14 @@ async fn fragmentos_por_palabras(
         .into_iter()
         .filter(|(_, _, contenido)| palabras.firme(&conjunto(contenido)))
         .take(usize::from(CANDIDATOS))
-        .map(|(id, fecha, _)| Fila { id, estado: EstadoNota::Vigente, reemplazada_por: None, fecha, firme: true })
+        .map(|(id, fecha, _)| Fila {
+            id,
+            estado: EstadoNota::Vigente,
+            reemplazada_por: None,
+            fecha,
+            firme: true,
+            suelta: false,
+        })
         .collect())
 }
 
@@ -348,30 +384,38 @@ fn fragmentos_por_significado(
             reemplazada_por: None,
             fecha: DateTime::from_timestamp(dato.fecha, 0).unwrap_or_default(),
             firme: true,
+            suelta: false,
         })
         .collect()
 }
 
 /// Suma a los candidatos lo que trajo un paso del alcance, mezclando las dos
 /// búsquedas. Lo que ya había aparecido en un paso anterior no se repite.
+/// Fuera del grupo de la conversación no entra lo que solo comparte una
+/// palabra suelta con la consulta: ahí no sirve ni para completar, porque en
+/// toda la base siempre hay alguna nota así.
 fn sumar(
     candidatos: &mut Vec<Candidato>,
     vistos: &mut HashSet<(Capa, i64)>,
-    capa: Capa,
-    etapa: usize,
+    paso: Paso,
     palabras: Vec<Fila>,
     significado: Vec<Fila>,
     ahora: DateTime<Utc>,
 ) {
+    let Paso { capa, etapa, del_grupo } = paso;
     let por_palabras: Vec<i64> = palabras.iter().map(|f| f.id).collect();
     let por_significado: Vec<i64> = significado.iter().map(|f| f.id).collect();
     let puntos = fusionar(&[&por_palabras, &por_significado]);
     let firmes: HashSet<i64> = palabras.iter().chain(&significado).filter(|f| f.firme).map(|f| f.id).collect();
     for mut fila in palabras.into_iter().chain(significado) {
+        let firme = firmes.contains(&fila.id);
+        if !firme && fila.suelta && !del_grupo {
+            continue;
+        }
         if !vistos.insert((capa, fila.id)) {
             continue;
         }
-        fila.firme = firmes.contains(&fila.id);
+        fila.firme = firme;
         let puntaje = puntos.get(&fila.id).copied().unwrap_or_default() + bono_reciente(fila.fecha, ahora);
         candidatos.push(Candidato { capa, fila, puntaje, etapa, antes: Vec::new() });
     }
@@ -403,7 +447,15 @@ async fn seguir_reemplazos(conn: &mut SqliteConnection, candidatos: &mut Vec<Can
         let leidas: HashMap<i64, Fila> = filas
             .into_iter()
             .map(|(id, estado_de_nota, reemplazada_por, creada)| {
-                (id, Fila { id, estado: estado(&estado_de_nota), reemplazada_por, fecha: creada, firme: false })
+                let fila = Fila {
+                    id,
+                    estado: estado(&estado_de_nota),
+                    reemplazada_por,
+                    fecha: creada,
+                    firme: false,
+                    suelta: false,
+                };
+                (id, fila)
             })
             .collect();
         for destino in &mut destinos {
@@ -666,13 +718,18 @@ pub async fn buscar(e: &Estado, grupo: Option<&Grupo>, c: &Consulta, huellas: &[
     for (etapa, (ids, nombre)) in etapas.iter().enumerate() {
         recorrido.push(nombre.clone());
         let ids = ids.as_deref();
+        // Solo el primer paso, y si se sabe de qué grupo es la conversación,
+        // busca dentro de su grupo: los demás traen notas de otros.
+        let del_grupo = etapa == 0 && grupo.is_some();
         let por_palabras = notas_por_palabras(&mut tx, ids, c, &palabras).await?;
         let por_significado = notas_por_significado(&mut tx, &e.indice, ids, c, huellas, e.umbrales.piso_notas).await?;
-        sumar(&mut candidatos, &mut vistos, Capa::Nota, etapa, por_palabras, por_significado, ahora);
+        let paso = Paso { capa: Capa::Nota, etapa, del_grupo };
+        sumar(&mut candidatos, &mut vistos, paso, por_palabras, por_significado, ahora);
         if con_fragmentos {
             let por_palabras = fragmentos_por_palabras(&mut tx, ids, c, &palabras, pedido.as_deref()).await?;
             let por_significado = fragmentos_por_significado(&e.indice, ids, c, huellas, e.umbrales.piso_fragmentos);
-            sumar(&mut candidatos, &mut vistos, Capa::Fragmento, etapa, por_palabras, por_significado, ahora);
+            let paso = Paso { capa: Capa::Fragmento, etapa, del_grupo };
+            sumar(&mut candidatos, &mut vistos, paso, por_palabras, por_significado, ahora);
         }
         if candidatos.iter().filter(|c| c.fila.firme).count() >= MINIMO {
             break;
@@ -742,8 +799,35 @@ mod pruebas {
     use super::*;
 
     fn candidato(capa: Capa, id: i64, estado: EstadoNota, puntaje: f64, etapa: usize) -> Candidato {
-        let fila = Fila { id, estado, reemplazada_por: None, fecha: Utc::now(), firme: true };
+        let fila = Fila { id, estado, reemplazada_por: None, fecha: Utc::now(), firme: true, suelta: false };
         Candidato { capa, fila, puntaje, etapa, antes: Vec::new() }
+    }
+
+    #[test]
+    fn una_palabra_suelta_solo_completa_dentro_del_grupo() {
+        let fila = |id: i64, firme: bool, suelta: bool| {
+            let mut c = candidato(Capa::Nota, id, EstadoNota::Vigente, 0.0, 0);
+            c.fila.firme = firme;
+            c.fila.suelta = suelta;
+            c.fila
+        };
+        // La 1 tiene todas las palabras; la 2, una sola; la 3, una parte que
+        // alcanza para completar; la 4, una sola, pero además llegó por significado.
+        let por_palabras =
+            || vec![fila(1, true, false), fila(2, false, true), fila(3, false, false), fila(4, false, true)];
+        let por_significado = || vec![fila(4, true, false)];
+        let sumadas = |del_grupo: bool| {
+            let (mut candidatos, mut vistos) = (Vec::new(), HashSet::new());
+            let ahora = Utc::now();
+            let paso = Paso { capa: Capa::Nota, etapa: 1, del_grupo };
+            sumar(&mut candidatos, &mut vistos, paso, por_palabras(), por_significado(), ahora);
+            // Otro paso del alcance trae lo mismo: no repite nada ni deja entrar lo que quedó afuera.
+            let otro = Paso { capa: Capa::Nota, etapa: 2, del_grupo: false };
+            sumar(&mut candidatos, &mut vistos, otro, por_palabras(), por_significado(), ahora);
+            candidatos.iter().map(|c| (c.fila.id, c.fila.firme, c.etapa)).collect::<Vec<_>>()
+        };
+        assert_eq!(sumadas(true), vec![(1, true, 1), (2, false, 1), (3, false, 1), (4, true, 1)]);
+        assert_eq!(sumadas(false), vec![(1, true, 1), (3, false, 1), (4, true, 1)]);
     }
 
     #[test]
