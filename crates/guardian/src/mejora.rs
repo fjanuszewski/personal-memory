@@ -31,7 +31,7 @@ const INTENTOS: i32 = 2;
 /// Cuántos agentes se lanzan, como mucho, en cada intento.
 const LANZAMIENTOS: i32 = 3;
 /// Cuánto puede trabajar un agente en una mejora.
-const LIMITE_AGENTE: Duration = Duration::from_mins(45);
+const LIMITE_AGENTE: Duration = Duration::from_mins(60);
 /// El mod avisa cada pocos segundos que su agente sigue andando. Si deja de
 /// avisar este rato, es que la conversación se cerró.
 const SIN_SENAL: Duration = Duration::from_mins(2);
@@ -492,13 +492,18 @@ impl Guardian {
             con_migracion = true;
         }
         tracing::info!(mejora = m.id, archivos = cambios.len(), "el agente terminó: se prueba su cambio");
-        self.compilar_y_probar(m, &dir, con_migracion).await?;
-
+        // El cambio queda guardado en la rama de la mejora antes de probarlo:
+        // si no pasa, se puede mirar ahí qué había hecho el agente.
         let mensaje = format!(
             "Mejora {}: {}\n\n{informe}\n\nHecha por el agente de mantenimiento de la memoria y revisada por el guardián.",
             m.id, m.resumen
         );
         let commit = git::guardar(cfg, &dir, &mensaje).await?;
+        self.compilar_y_probar(m, &dir, con_migracion).await.map_err(|motivo| Falla {
+            motivo,
+            puntajes: None,
+            rama: Some(rama.clone()),
+        })?;
         let candidato = candidato(cfg, m.id);
         std::fs::copy(git::compilados_de(&dir).join("release/memoria"), &candidato)
             .context("no encontré el programa recién compilado")?;
@@ -832,6 +837,9 @@ mod pruebas {
             std::fs::write(cfg.repo.join("README.md"), "# Prueba\n").unwrap();
             let mut ensayo = Self { guardian: Guardian::nuevo(cfg, pool), dir, version: String::new() };
             ensayo.git(&["init", "--quiet", "--initial-branch", "instalada"]);
+            // Como lo deja el instalador: el guardián guarda las mejoras a su nombre.
+            ensayo.git(&["config", "user.name", "memoria-guardian"]);
+            ensayo.git(&["config", "user.email", "guardian@example.invalid"]);
             ensayo.version = ensayo.guardar_en_el_codigo("inicial");
             ensayo
         }
@@ -1069,6 +1077,20 @@ mod pruebas {
             fallida("El agente tocó archivos que no puede tocar: README.md.")
         );
 
+        // Un cambio bien ubicado que después no pasa un paso (acá no hay
+        // `cargo`, así que no compila): no se instala, pero queda guardado en
+        // la rama de la mejora para poder mirarlo.
+        let (id, copia) = e.esperando_agente().await;
+        std::fs::write(copia.join(BUSCAR), "pub fn buscar() -> u8 { 3 }\n").unwrap();
+        let (estado, motivo) = e.terminar_con(id, "Cambié la búsqueda.").await;
+        assert_eq!(estado, "fallida");
+        assert!(motivo.as_deref().is_some_and(|m| m.starts_with("El cambio no compila")), "{motivo:?}");
+        let rama = e.texto(id, "rama").await.expect("queda anotada la rama del cambio");
+        assert_eq!(rama, format!("mejora-{id}-1"));
+        assert!(e.git(&["show", "--stat", "--format=%s", &rama]).contains(BUSCAR));
+        assert!(e.git(&["show", &format!("{rama}:{BUSCAR}")]).contains("-> u8 { 3 }"));
+        assert!(!copia.exists());
+
         // Otra mejora se instaló mientras el agente trabajaba: esta vuelve a
         // la fila para rehacerse sobre la versión nueva.
         let (id, copia) = e.esperando_agente().await;
@@ -1100,7 +1122,7 @@ mod pruebas {
         assert_eq!(senal.mirar("b", t0 + seg(limite - 1)), None);
         assert_eq!(senal.mirar("c", t0 + seg(limite + 1)), Some(Corte::Largo));
         assert!(Corte::SinSenal.motivo().contains("se cerró"));
-        assert!(Corte::Largo.motivo().contains("45 minutos"));
+        assert!(Corte::Largo.motivo().contains("60 minutos"));
     }
 
     #[test]

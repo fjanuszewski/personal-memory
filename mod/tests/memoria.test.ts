@@ -702,6 +702,7 @@ test('al aceptar la mejora lanza al agente adentro de esa misma llamada, y avisa
       name: 'mantenimiento',
       tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'],
       permissionMode: 'dontAsk',
+      effort: 'high',
       omitClaudeMd: true,
     }),
   )

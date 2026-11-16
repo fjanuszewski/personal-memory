@@ -15,11 +15,13 @@ Un reporte de falla, con el ejemplo concreto: qué se buscó, qué se esperaba y
 
 ## Cómo trabajar
 
-1. Leé `README.md` y `docs/diseno.md` para ubicarte, y después el código que tenga que ver con la falla (`crates/servicio/src/`). La búsqueda está en `buscar.rs`, cómo se reducen las palabras a su raíz en `texto.rs`, las notas en `notas.rs`, los umbrales en `estado.rs`, las huellas en `huellas.rs` e `indice.rs`, y el lector de conversaciones en `lector.rs`. La base es un archivo de SQLite; las consultas son texto común dentro del código.
+1. Leé `README.md` para ubicarte y después el código que tenga que ver con la falla (`crates/servicio/src/`). No hace falta leer todo el repositorio: tenés cerca de una hora, y cuanto más leas de más, más lento vas. De `docs/diseno.md` alcanza con el punto de búsqueda (4.6). La búsqueda está en `buscar.rs`, cómo se reducen las palabras a su raíz en `texto.rs`, las notas en `notas.rs`, los umbrales en `estado.rs`, las huellas en `huellas.rs` e `indice.rs`, y el lector de conversaciones en `lector.rs`. La base es un archivo de SQLite; las consultas son texto común dentro del código.
 2. Antes de cambiar nada, entendé por qué pasó. Si la memoria hizo lo correcto (por ejemplo, lo buscado no está guardado en ningún lado), no hay nada que arreglar: no cambies nada y explicalo.
 3. Hacé el cambio más chico que arregle la causa, no solo el ejemplo. Los umbrales de `estado.rs` son de lo primero que conviene mirar.
 4. Sumá una prueba que reproduzca la falla y pase con tu cambio (`crates/servicio/tests/`).
 5. Dejá todo en verde: `cargo test -p memoria` y `cargo clippy -p memoria --all-targets` sin avisos. Las pruebas arman su propia base: no hace falta ninguna otra.
+6. El guardián corre todas las pruebas de nuevo, por su cuenta, antes de instalar. Las que usan el modelo de huellas de verdad dan parecidos que cambian un poco de una corrida a otra: un cambio que dependa del tercer decimal de un umbral va a pasar acá y fallar allá, y se descarta entero. Dejá margen, y antes de terminar corré `cargo test -p memoria` completo dos veces seguidas.
+7. No dejes pruebas temporales ni de medición: sacalas antes de terminar.
 
 ## Lo que no puede cambiar
 

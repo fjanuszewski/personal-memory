@@ -99,14 +99,16 @@ fn entre_comillas(texto: &str) -> String {
 /// El programita que hace de `cargo` para el agente: lo corre en la copia,
 /// con el mismo entorno mínimo que usa el guardián (nada de la conversación
 /// de Claude pasa a lo que se compila o se prueba) y compilando en la carpeta
-/// de la mejora. Sin permiso para sumar librerías, tampoco tiene red.
+/// de la mejora.
+///
+/// No se le corta la red: una de las librerías baja una pieza ya compilada
+/// la primera vez que se arma en una carpeta nueva, y sin red el servicio no
+/// llega a enlazar. Que el agente no sume librerías por su cuenta lo cuida el
+/// guardián al revisar qué archivos cambió.
 #[must_use]
-pub fn guion_de_cargo(cfg: &Config, copia: &Path, con_red: bool) -> String {
+pub fn guion_de_cargo(cfg: &Config, copia: &Path) -> String {
     let mut entorno = cfg.entorno();
     entorno.push(("CARGO_TARGET_DIR", git::compilados_de(copia).display().to_string()));
-    if !con_red {
-        entorno.push(("CARGO_NET_OFFLINE", "true".to_owned()));
-    }
     let variables: Vec<String> =
         entorno.iter().map(|(nombre, valor)| format!("{nombre}={}", entre_comillas(valor))).collect();
     format!(
@@ -120,9 +122,9 @@ pub fn guion_de_cargo(cfg: &Config, copia: &Path, con_red: bool) -> String {
 }
 
 /// Deja el `cargo` de la mejora listo para usar. Devuelve dónde quedó.
-pub fn dejar_cargo(cfg: &Config, copia: &Path, con_red: bool) -> anyhow::Result<PathBuf> {
+pub fn dejar_cargo(cfg: &Config, copia: &Path) -> anyhow::Result<PathBuf> {
     let archivo = cargo_de(copia);
-    std::fs::write(&archivo, guion_de_cargo(cfg, copia, con_red))
+    std::fs::write(&archivo, guion_de_cargo(cfg, copia))
         .with_context(|| format!("no pude escribir {}", archivo.display()))?;
     std::fs::set_permissions(&archivo, std::fs::Permissions::from_mode(0o700))
         .with_context(|| format!("no pude dejar {} como programa", archivo.display()))?;
@@ -132,7 +134,7 @@ pub fn dejar_cargo(cfg: &Config, copia: &Path, con_red: bool) -> anyhow::Result<
 impl Encargo {
     /// Arma el encargo de una mejora cuya copia del código ya está en `copia`.
     pub fn armar(cfg: &Config, m: &Mejora, copia: &Path) -> anyhow::Result<Self> {
-        let cargo = dejar_cargo(cfg, copia, m.permisos.suma_librerias)?;
+        let cargo = dejar_cargo(cfg, copia)?;
         Ok(Self { copia: copia.display().to_string(), cargo: cargo.display().to_string(), pedido: pedido(m, copia) })
     }
 }
@@ -212,12 +214,12 @@ mod pruebas {
         let cfg = Config::de_prueba(&dir);
         assert_eq!(cargo_de(&copia), dir.join("trabajo de 'prueba'/mejora-7-cargo"));
 
-        let guion = guion_de_cargo(&cfg, &copia, false);
+        let guion = guion_de_cargo(&cfg, &copia);
         assert!(guion.starts_with("#!/bin/sh\n"));
         assert!(guion.contains("/usr/bin/env -i HOME="), "{guion}");
-        assert!(guion.contains("CARGO_NET_OFFLINE='true'"), "{guion}");
         assert!(guion.contains("mejora-7-compilado'"), "{guion}");
-        assert!(!guion_de_cargo(&cfg, &copia, true).contains("CARGO_NET_OFFLINE"));
+        // Con la red cortada el servicio no llega a enlazar en una carpeta nueva.
+        assert!(!guion.contains("CARGO_NET_OFFLINE"), "{guion}");
 
         // De verdad: un `cargo` de mentira dice dónde corre y qué le llega.
         let bin = dir.join("bin");
@@ -226,7 +228,7 @@ mod pruebas {
         std::fs::write(
             &falso,
             "#!/bin/sh\necho \"en=$(pwd -P)\"\necho \"args=$*\"\necho \"destino=$CARGO_TARGET_DIR\"\n\
-             echo \"red=$CARGO_NET_OFFLINE\"\necho \"rastro=$RUST_BACKTRACE\"\necho \"secreto=$SECRETO\"\n",
+             echo \"rastro=$RUST_BACKTRACE\"\necho \"secreto=$SECRETO\"\n",
         )
         .unwrap();
         std::fs::set_permissions(&falso, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -250,7 +252,7 @@ mod pruebas {
         assert!(dicho.contains(&format!("en={}\n", real.display())), "{dicho}");
         assert!(dicho.contains("args=test -p memoria\n"), "{dicho}");
         assert!(dicho.contains("mejora-7-compilado\n"), "{dicho}");
-        assert!(dicho.contains("red=true\n") && dicho.contains("rastro=1\n"), "{dicho}");
+        assert!(dicho.contains("rastro=1\n"), "{dicho}");
         assert!(dicho.contains("secreto=\n"), "nada del entorno de quien lo llama pasa: {dicho}");
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -61,7 +61,7 @@ Con `sesion` en vez de `id`, `memoria_mejora_estado` es además el canal del mod
 4. **El cambio lo hace un agente dentro de Claude.** El mod de la conversación donde se aceptó lo lanza de fondo, con la sesión de Claude que ya está abierta: no hay que sacar ninguna llave ni configurar nada. Mientras tanto se puede seguir conversando. El mod le pone los límites y decide él cada permiso, sin que la app pregunte nada:
    - lee y busca solo dentro de la copia;
    - edita solo `crates/servicio/` y `migraciones/`;
-   - lo único que corre es `cargo build`, `check`, `test`, `clippy` y `fmt`, con el entorno mínimo (nada de la conversación pasa a lo que se compila) y sin red, salvo que el usuario haya aceptado sumar librerías;
+   - lo único que corre es `cargo build`, `check`, `test`, `clippy` y `fmt`, con el entorno mínimo (nada de la conversación pasa a lo que se compila);
    - no tiene internet ni ninguna otra herramienta.
 
    El mod lo lanza siempre mientras atiende algo de la conversación (la llamada que acepta la mejora, el fin de un turno, un mensaje): es la única forma de que sus límites alcancen al agente. Y tiene un freno: si no escucha el arranque del agente, lo detiene antes de que haga nada.

@@ -293,6 +293,9 @@ async function registrarTipo($: EngineInterface): Promise<boolean> {
       prompt: INSTRUCCIONES_AGENTE,
       tools: [...HERRAMIENTAS],
       model: 'inherit',
+      // Con su propio nivel de esfuerzo: si heredara el de una conversación
+      // puesta al máximo, cada paso suyo podría tardar muchos minutos.
+      effort: 'high',
       // Nunca le pregunta nada al usuario: lo que el mod no aprueba, se niega.
       permissionMode: 'dontAsk',
       maxTurns: 200,

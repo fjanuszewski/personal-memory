@@ -321,7 +321,7 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
    3. Deja el encargo para el agente, que corre dentro de una conversación de Claude, lanzado por el mod (al principio lo lanzaba el guardián con `claude -p` y una llave; ver «El agente corre dentro de Claude», más abajo).
       - **Permisos limitados:** leer y editar solo `crates/servicio/` y `migraciones/`, y compilar y probar.
       - **Sin internet ni otras herramientas:** sin búsqueda web y sin servidores MCP. Internet solo para bajar librerías, si el usuario aceptó una mejora que las suma.
-      - **Límite de 45 minutos.**
+      - **Límite de 60 minutos.**
    4. El agente hace el cambio y deja un resumen.
    5. El guardián compila, corre las pruebas y la batería contra la copia de la base, y compara. Se acepta solo si:
       - el puntaje no baja;
@@ -346,7 +346,7 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
 - **De dónde parte cada mejora.** Del commit del que salió lo instalado (`~/.memoria/instalada`), no de la rama principal. Si lo instalado tenía cambios sin guardar en git, no se hacen mejoras hasta guardarlos e instalar de nuevo.
 - **Vuelta atrás.** La base solo se restaura si el programa nuevo llegó a cambiar su estructura. La base que falló se renombra (`memoria_fallida_…`), no se borra.
 - **El agente no necesita ninguna llave** desde el 14/11/2026: corre dentro de la conversación de Claude (ver abajo). Antes había que sacarle una con `claude setup-token`.
-- **Sin internet** se cumple quitándole al agente las herramientas de red y los servidores MCP, y corriendo su `cargo` sin red; no hay un encierro del sistema operativo. Lo que el agente escribe en el servicio se ejecuta al probar (pruebas, pasos de compilación): por eso lo que decide qué se instala no es el agente sino el guardián, que revisa qué archivos cambiaron, prueba y mide.
+- **Sin internet** se cumple quitándole al agente las herramientas de red y los servidores MCP; su `cargo` sí tiene red, porque la necesita para compilar, y no hay un encierro del sistema operativo. Lo que el agente escribe en el servicio se ejecuta al probar (pruebas, pasos de compilación): por eso lo que decide qué se instala no es el agente sino el guardián, que revisa qué archivos cambiaron, prueba y mide.
 - **Señales.** Se guardan `busqueda`, `busqueda_vacia`, `lenta` y `error`. Quedaron sin hacer `resultado_no_usado` y `repetida`.
 - **Probado** con un ensayo completo (copia de la base, del código y del servicio) y un agente de mentira: una mejora buena se instala; una que rompe la batería, una que toca archivos protegidos y una sin cambios se descartan; una instalación que sale mal se deshace con base incluida; y dos a la vez se instalan en fila.
 
@@ -362,9 +362,9 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
   - Antes de cada llamada (`tool.call`): las rutas se resuelven dentro de la copia; leer y buscar, solo ahí; escribir, solo en `crates/servicio/` y `migraciones/`; y de la terminal solo pasa `cargo build|check|test|clippy|fmt` con opciones simples, cambiado por el `cargo` de la mejora.
   - En el permiso (`tool.check`): se aprueba solo lo que ya quedó en esa forma; lo demás se niega. Así la app nunca le pide permiso al usuario por algo del agente.
   - Lo que hace el usuario en la conversación, y cualquier otro agente, sigue de largo sin cambios.
-- **El `cargo` de la mejora** es un programita que deja el guardián al lado de la copia (fuera de ella, para que el agente no lo edite): entra a la copia, limpia el entorno (nada de la conversación de Claude pasa a lo que se compila o se prueba), compila en la carpeta de esa mejora y corre sin red, salvo que el usuario haya aceptado sumar librerías.
+- **El `cargo` de la mejora** es un programita que deja el guardián al lado de la copia (fuera de ella, para que el agente no lo edite): entra a la copia, limpia el entorno (nada de la conversación de Claude pasa a lo que se compila o se prueba) y compila en la carpeta de esa mejora. No se le corta la red: una de las librerías baja una pieza ya compilada la primera vez que se arma en una carpeta nueva, y sin red el servicio no enlaza (pasó en la primera corrida real). Que no se sumen librerías sin permiso lo cuida el guardián al revisar qué cambió.
 - **Las reglas del agente siguen en el guardián** (`crates/guardian/instrucciones.md`): viajan al principio del pedido. El agente no las puede cambiar.
-- **Si el agente no termina.** El mod avisa cada 10 segundos qué agentes siguen andando. Si deja de avisar dos minutos (se cerró la conversación o la app), si el agente pasa de 45 minutos o si el mod anota que falló, el guardián arma la copia de nuevo y la mejora vuelve a esperar. Al tercer agente que no termina, queda sin instalar y se avisa el motivo. El silencio se mide con el reloj de la Mac despierta: una siesta de la máquina no cuenta.
+- **Si el agente no termina.** El mod avisa cada 10 segundos qué agentes siguen andando. Si deja de avisar dos minutos (se cerró la conversación o la app), si el agente pasa de 60 minutos o si el mod anota que falló, el guardián arma la copia de nuevo y la mejora vuelve a esperar. Al tercer agente que no termina, queda sin instalar y se avisa el motivo. El silencio se mide con el reloj de la Mac despierta: una siesta de la máquina no cuenta.
 - **Si el guardián le saca la mejora a un agente que sigue vivo**, el mod se entera en la vuelta siguiente y desde ahí le niega todo, para que termine.
 - **Lo que cambia para el usuario:** no hay llave; el agente trabaja solo con la conversación abierta; y se ve entre las tareas de fondo de esa conversación.
 
@@ -376,6 +376,14 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
 - **El informe.** El agente lo entrega por una vía propia de la app (`SubagentHandback`), que la app revisa sola. El mod no la toca: si intenta aprobarla él, la app la rechaza.
 - **Sin el mod, el agente no escribe.** Con `permissionMode: dontAsk`, lo que el mod no aprueba queda negado: un agente fuera de sus límites puede leer, pero no editar ni correr nada que cambie algo. Es la red de abajo; el freno hace que ni siquiera llegue a leer.
 - **Una conversación abierta no conoce las herramientas nuevas del servicio** hasta que se reinicia: lo que el mod necesite del servicio tiene que ir por herramientas que ya existían.
+
+**La primera mejora que recorrió todo el camino (16/11/2026).** Con eso corregido, la mejora 1 se lanzó de nuevo: el servicio esperó 3 segundos a que el guardián armara la copia, el mod lanzó al agente adentro de la llamada que la aceptó, el agente trabajó 72 minutos dentro de sus límites (62 lecturas, 51 ediciones y 25 corridas de `cargo`, sin que la app pidiera un solo permiso), entregó su informe, y el guardián revisó sus cinco archivos y lo probó. **Lo descartó:** al correr las pruebas por su cuenta falló una de las que usan el modelo de verdad, que al agente le había pasado dos veces. El cambio bajaba un umbral hasta quedar a milésimas de lo que da una pregunta que no tiene nada que ver, y los parecidos cambian un poco de una corrida a otra. No se instaló nada. Lo que dejó:
+- **El `cargo` del agente necesita red.** Con la red cortada, la librería del modelo no bajaba su pieza y el servicio no enlazaba (ver arriba).
+- **El agente trabaja con su propio nivel de esfuerzo** (`effort: high`). Heredaba el de la conversación; con la conversación al máximo, una sola respuesta suya tardó 20 minutos.
+- **Tiene 60 minutos**, no 45, y las reglas le piden no leer todo el repositorio.
+- **Las reglas avisan que el guardián prueba de nuevo** y que un cambio que dependa del tercer decimal de un umbral se descarta; piden correr todas las pruebas dos veces y no dejar pruebas temporales.
+- **El cambio queda guardado aunque no pase.** El guardián lo guarda en la rama de la mejora (`mejora-N-I`, en `~/.memoria/codigo`) antes de compilar y probar, y anota la rama: así se puede ver qué había hecho el agente. Antes se perdía.
+- **Queda pendiente:** que una mejora cuyo cambio no pasa las pruebas vuelva al agente con lo que falló, en vez de terminar ahí.
 
 **Concurrencia:**
 - Hasta 2 agentes a la vez. La instalación se hace en fila.
