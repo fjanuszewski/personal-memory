@@ -57,6 +57,16 @@ async fn bateria(cfg: &Config, programa: Option<String>) -> anyhow::Result<()> {
     for fallada in corrida.falladas() {
         println!("  no pasó: {}", fallada.split_once(':').map_or(fallada, |(_, pregunta)| pregunta));
     }
+    for (control, notas) in &corrida.ajenas {
+        let pregunta = control.split_once(':').map_or(control.as_str(), |(_, pregunta)| pregunta);
+        let lista = notas.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+        let cuales = if notas.len() == 1 { "la nota" } else { "las notas" };
+        println!("  «{pregunta}» trae de tu base {cuales} {lista}.");
+    }
+    if !corrida.ajenas.is_empty() {
+        println!("  Lo que una pregunta de control trae de tu base no cuenta como falla: puede hablar de eso.");
+        println!("  Si no tiene nada que ver con lo que pregunta, decíselo a Claude para que lo reporte.");
+    }
     Ok(())
 }
 

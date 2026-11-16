@@ -326,6 +326,7 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
    5. El guardián compila, corre las pruebas y la batería contra la copia de la base, y compara. Se acepta solo si:
       - el puntaje no baja;
       - no se rompe ninguna pregunta que ya andaba;
+      - ninguna pregunta de control trae de la base real notas que antes no traía;
       - pasa la pregunta nueva;
       - el cambio no toca archivos protegidos.
    6. Si pasa, instala de a una mejora por vez:
@@ -342,7 +343,8 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
 **Cómo quedó hecho (13/11/2026):**
 - **Permisos.** «Toca la base», «borra datos» y «suma librerías» son lo que el reporte dice que el arreglo puede necesitar; el usuario lo acepta al contestar y el guardián lo hace cumplir: sin ese permiso, un cambio con una migración nueva, con un borrado o con librerías nuevas se descarta. Una migración ya aplicada no se puede cambiar nunca.
 - **Firma.** Son las palabras de lo que se buscó (o del resumen), sin acentos ni terminaciones. Para las propuestas del servicio, además, no se repite una mientras haya otra abierta por búsquedas parecidas en el mismo grupo.
-- **Batería.** Tiene dos partes: la inicial (`bateria/inicial.json`, con sus propias notas, que se cargan en la copia de la base) y la que crece con cada reporte (tabla `bateria`, sobre notas reales). Incluye preguntas que no tienen que traer nada. Lo esperado tiene que estar entre los 5 primeros resultados, buscando solo en notas.
+- **Batería.** Tiene dos partes: la inicial (`bateria/inicial.json`, con sus propias notas, que se cargan en la copia de la base) y la que crece con cada reporte (tabla `bateria`, sobre notas reales). Lo esperado tiene que estar entre los 5 primeros resultados, buscando solo en notas.
+- **Preguntas de control.** La batería inicial incluye preguntas que no tienen que traer nada («receta de tarta de manzana»): miden que la búsqueda no invente resultados. Eso solo se puede juzgar con las notas de la batería, que se sabe que no hablan de esos temas. La copia de la base trae además las notas reales, y de esas el guardián no sabe de qué hablan: el día que una nombra el tema de un control, o habla de algo vecino (una nota sobre Docker para «kubernetes»), encontrarla puede estar bien. Por eso un control falla solo si trae una nota de la batería. Lo que trae de la base real no se juzga: se anota (el comando `bateria` lo muestra) y, al comparar, un cambio no puede hacer que un control traiga notas que antes no traía. A los controles se les piden hasta 20 resultados, para comparar bien una corrida con la otra. Antes un control fallaba con cualquier resultado y quedaba fallando para siempre apenas la memoria real nombraba su tema: dejaba de medir. Pasó dos veces el mismo día, con una nota que citaba la frase de un control y con otra que hablaba de un tema parecido.
 - **De dónde parte cada mejora.** Del commit del que salió lo instalado (`~/.memoria/instalada`), no de la rama principal. Si lo instalado tenía cambios sin guardar en git, no se hacen mejoras hasta guardarlos e instalar de nuevo.
 - **Vuelta atrás.** La base solo se restaura si el programa nuevo llegó a cambiar su estructura. La base que falló se renombra (`memoria_fallida_…`), no se borra.
 - **El agente no necesita ninguna llave** desde el 14/11/2026: corre dentro de la conversación de Claude (ver abajo). Antes había que sacarle una con `claude setup-token`.

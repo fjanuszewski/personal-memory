@@ -517,6 +517,7 @@ impl Guardian {
             de = despues.resultados.len(),
             fallaban = ?antes.falladas(),
             fallan = ?despues.falladas(),
+            ajenas = ?despues.ajenas,
             "batería corrida"
         );
         if let Err(motivo) = bateria::veredicto(&antes, &despues, nueva.as_deref()) {

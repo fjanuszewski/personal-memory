@@ -68,7 +68,7 @@ Con `sesion` en vez de `id`, `memoria_mejora_estado` es además el canal del mod
 5. **Cuando el agente termina, el guardián lo revisa todo:**
    - que no haya tocado nada más, ni cambiado la base, borrado datos o sumado librerías sin que el usuario lo haya aceptado;
    - compila, corre las pruebas y el revisor de código;
-   - corre la batería con el programa instalado y con el nuevo, cada uno sobre una copia de la base. El cambio se acepta solo si no rompe ninguna pregunta que andaba, no baja el puntaje y arregla el ejemplo del reporte.
+   - corre la batería con el programa instalado y con el nuevo, cada uno sobre una copia de la base. El cambio se acepta solo si no rompe ninguna pregunta que andaba, no baja el puntaje, no hace que una pregunta de control traiga notas que antes no traía y arregla el ejemplo del reporte.
 6. **Instala de a una:** respaldo de la base, reemplazo del programa (guardando el anterior), reinicio y 30 segundos de vigilancia. Si el servicio no queda sano, vuelve al programa anterior y, si el nuevo había cambiado la base, a la base del respaldo. La base que falló no se borra: queda al lado, como `memoria.db.fallida-…`.
 7. **Avisa en el chat** donde el usuario aceptó: una línea con el resultado y, si se instaló, un mensaje para que Claude retome lo que había fallado. Si esa conversación se cerró, el aviso aparece al reabrirla o, pasadas unas horas, en otra del mismo grupo.
 
@@ -123,6 +123,8 @@ Para medir la búsqueda en cualquier momento, sin tocar nada (prende una copia d
 ```bash
 ~/.memoria/bin/memoria-guardian bateria
 ```
+
+Algunas preguntas de la batería son de control: preguntan por temas de los que sus notas de ejemplo no hablan, y no tienen que traer ninguna de ellas. Si traen notas tuyas, el comando las muestra y no cuenta como falla (puede que hablen de eso); lo que sí se controla es que un cambio no haga que traigan más.
 
 ## De qué grupo es cada conversación
 
