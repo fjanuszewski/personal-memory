@@ -67,9 +67,6 @@ const FRENO = 'TaskStop'
 // Cuánto se le da al guardián para armar la copia cuando se espera adentro de un gancho.
 const ESPERA_COPIA_MS = 12_000
 const SIN_RESUMEN = 'El agente terminó, pero no quedó registrado su resumen.'
-// Cuánto se le da al programa que lee las fuentes encendidas. La primera vez
-// el sistema le pregunta al usuario si lo deja, y hay que darle tiempo a contestar.
-const ESPERA_JUNTAR_MS = 120_000
 
 // Cambiar la etiqueta si cambian los campos (o si lo guardado por una versión
 // anterior ya no sirve): descarta lo que sobrevive a la recarga.
@@ -612,28 +609,6 @@ async function atenderAgentes($: EngineInterface, sesion: string, estado: Estado
   porLanzar = estado.paraAgente.some(encargo => !propias.includes(encargo.id))
 }
 
-// ---------- fuentes ----------
-
-let juntando = false
-
-// Lee las fuentes que el usuario encendió (hoy, WhatsApp) para aprender cómo
-// escribe (docs/diseno.md, 4.11). Lo corre el mod, y no el servicio, porque es
-// a Claude Code a quien el sistema le da permiso para ver los datos de otras
-// aplicaciones. Qué pasó lo anota el mismo programa en la base: acá no hay
-// nada que mostrar ni que esperar.
-async function juntarFuentes($: EngineInterface, programa: string): Promise<void> {
-  if (juntando) return
-  juntando = true
-  try {
-    await $.process.run([programa, 'juntar'], { timeoutMs: ESPERA_JUNTAR_MS })
-  } catch {
-    // No arrancó o tardó de más (por ejemplo, esperando el permiso del
-    // sistema): el servicio lo vuelve a pedir más adelante.
-  } finally {
-    juntando = false
-  }
-}
-
 // ---------- mejoras ----------
 
 let vigia: Timer | undefined
@@ -693,8 +668,6 @@ async function revisarMejoras($: EngineInterface): Promise<void> {
     }
     const anotados = mostrados
     await update($, avisos, () => ({ mostrados: anotados }))
-    // De paso: si toca leer las fuentes encendidas, se lanza y no se espera.
-    if (estado.juntar !== null) void juntarFuentes($, estado.juntar)
     await atenderAgentes($, c.sesion, estado).catch(err => {
       // No se pierde: queda a la vista con /memoria y se prueba de nuevo en la próxima vuelta.
       problema = `No pude atender al agente de la memoria: ${motivoDe(err)}`

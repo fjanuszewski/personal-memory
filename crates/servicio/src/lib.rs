@@ -160,18 +160,21 @@ async fn preparar_huellas(cfg: &Config) -> anyhow::Result<String> {
     }
 }
 
-/// Lee las fuentes encendidas (hoy, WhatsApp) y guarda lo que el usuario
-/// escribió en ellas. Es lo que corre `memoria juntar`: lo lanza el mod desde
-/// Claude Code, no el servicio. Devuelve si anduvo y qué pasó.
-pub async fn juntar(cfg: &Config, modo: estilo::fuentes::Modo) -> anyhow::Result<(bool, String)> {
+/// Lee ahora las fuentes encendidas (hoy, WhatsApp) y guarda lo que el
+/// usuario escribió en ellas; con `probar`, solo cuenta lo que entraría. Es
+/// lo que corre `memoria juntar`, a mano: el servicio las lee solo cuando
+/// toca. Devuelve si anduvo y qué pasó.
+pub async fn juntar(cfg: &Config, probar: bool) -> anyhow::Result<(bool, String)> {
     let pool = base::abrir(&cfg.bd).await?;
     let lista: i64 = sqlx::query_scalar("select count(*) from sqlite_master where name = 'mensajes_propios'")
         .fetch_one(&pool)
         .await?;
     let resultado = if lista == 0 {
         Ok((false, "La base todavía no está lista: tiene que arrancar el servicio primero.".to_owned()))
+    } else if probar {
+        Ok(estilo::fuentes::probar(&pool, &cfg.fuentes, &cfg.nombre).await)
     } else {
-        estilo::fuentes::juntar(&pool, &cfg.fuentes, &cfg.nombre, modo).await
+        estilo::fuentes::juntar(&pool, &cfg.fuentes, &cfg.nombre).await.map_err(Into::into)
     };
     pool.close().await;
     resultado
@@ -199,6 +202,7 @@ pub async fn arrancar(cfg: Config) -> anyhow::Result<()> {
         respaldo::tarea_diaria(pool.clone(), cfg.clone()),
         huellas::tarea(estado.clone(), apagado.clone()),
         lector::tarea(estado.clone(), cfg.conversaciones.clone(), apagado.clone()),
+        estilo::fuentes::tarea(estado.clone(), apagado.clone()),
     ];
     let rutas = web::rutas(estado, &clave, apagado.clone());
     let escucha = tokio::net::TcpListener::bind(cfg.direccion)

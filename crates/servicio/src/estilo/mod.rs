@@ -30,6 +30,7 @@ use crate::lector::{self, Ubicaciones};
 use crate::notas::{TAPADO, tapar_secretos};
 use crate::{base, texto};
 
+use self::numeros::Medido;
 use self::propios::Propio;
 
 /// La fuente de los mensajes escritos en conversaciones con Claude, y el
@@ -46,8 +47,14 @@ const EJEMPLO_MAXIMO: usize = 300;
 const RENGLONES_DE_EJEMPLO: usize = 3;
 /// Con menos mensajes que estos no se arma un perfil.
 const MINIMO_PARA_PERFIL: usize = 5;
-/// Con menos mensajes que estos, el perfil es apenas una pista.
+/// Con menos mensajes que estos, el perfil es apenas una pista; y hacen
+/// falta por lo menos estos a una persona para medir cómo le escribe a ella.
 const POCOS: usize = 30;
+/// Cuántas horas de silencio en una conversación separan una charla de la
+/// siguiente: después de eso, se vuelve a saludar.
+const HORAS_ENTRE_CHARLAS: i64 = 6;
+/// Cuántos chats se nombran cuando un nombre coincide con varios.
+const CHATS_NOMBRADOS: usize = 5;
 
 /// Guarda mensajes del usuario; los que ya estaban no se repiten. Devuelve
 /// cuántos eran nuevos.
@@ -171,7 +178,7 @@ pub struct Pedido<'a> {
     /// Dónde va a salir lo que se va a escribir.
     pub lugar: Option<&'a str>,
     pub idioma: Option<&'a str>,
-    /// A quién se le va a escribir.
+    /// A quién se le va a escribir: el nombre de la persona o del grupo.
     pub para: Option<&'a str>,
     /// De qué trata.
     pub sobre: Option<&'a str>,
@@ -198,6 +205,8 @@ struct Mensaje {
     idioma: String,
     /// Si se lo mandó a alguien (por una mensajería, por correo) y no a Claude.
     dirigido: bool,
+    /// Dónde lo escribió, si se sabe: una conversación con Claude o un chat.
+    conversacion: Option<String>,
     para: Option<String>,
     fecha: DateTime<Utc>,
     contenido: String,
@@ -206,8 +215,18 @@ struct Mensaje {
     grupo: Option<String>,
 }
 
-type Fila =
-    (String, String, String, Option<String>, DateTime<Utc>, String, Option<i64>, Option<String>, Option<String>);
+type Fila = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    DateTime<Utc>,
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
 
 /// Cuántos mensajes hay de cada lugar y de cada idioma.
 async fn cuentas(pool: &SqlitePool) -> Resultado<Vec<(String, String, usize)>> {
@@ -220,28 +239,39 @@ async fn cuentas(pool: &SqlitePool) -> Resultado<Vec<(String, String, usize)>> {
 }
 
 /// Los mensajes más nuevos de un lugar (o de todos, si es `None`) en un
-/// idioma; con `con_cortos`, también los que son muy cortos para tener idioma.
-async fn mensajes(pool: &SqlitePool, lugar: Option<&str>, idioma: &str, con_cortos: bool) -> Resultado<Vec<Mensaje>> {
+/// idioma; con `con_cortos`, también los que son muy cortos para tener
+/// idioma. Con `para`, solo los que le mandó a esa persona o a ese grupo.
+async fn mensajes(
+    pool: &SqlitePool,
+    lugar: Option<&str>,
+    idioma: &str,
+    con_cortos: bool,
+    para: Option<&str>,
+) -> Resultado<Vec<Mensaje>> {
     let filas: Vec<Fila> = sqlx::query_as(
-        "select m.fuente, m.lugar, m.idioma, m.para, m.fecha, m.contenido, c.grupo_id, g.empresa, g.proyecto
+        "select m.fuente, m.lugar, m.idioma, m.conversacion, m.para, m.fecha, m.contenido, c.grupo_id, g.empresa,
+                g.proyecto
          from mensajes_propios m
          left join conversaciones c on m.fuente = 'claude' and c.id = m.conversacion
          left join grupos g on g.id = c.grupo_id
          where (?1 is null or m.lugar = ?1) and (m.idioma = ?2 or (?3 and m.idioma = ''))
-         order by m.fecha desc, m.id desc limit ?4",
+           and (?4 is null or m.para = ?4)
+         order by m.fecha desc, m.id desc limit ?5",
     )
     .bind(lugar)
     .bind(idioma)
     .bind(con_cortos)
+    .bind(para)
     .bind(MAXIMO_PARA_MEDIR)
     .fetch_all(pool)
     .await?;
     Ok(filas
         .into_iter()
-        .map(|(fuente, lugar, idioma, para, fecha, contenido, grupo_id, empresa, proyecto)| Mensaje {
+        .map(|(fuente, lugar, idioma, conversacion, para, fecha, contenido, grupo_id, empresa, proyecto)| Mensaje {
             lugar,
             idioma,
             dirigido: fuente != FUENTE_CLAUDE,
+            conversacion,
             para,
             fecha,
             contenido,
@@ -278,6 +308,110 @@ fn idioma_principal(cuentas: &[(String, String, usize)], lugar: Option<&str>) ->
     lista.first().map_or_else(String::new, |(idioma, _)| (*idioma).to_owned())
 }
 
+/// A quién le va a escribir, entre las personas y los grupos a los que el
+/// usuario ya les escribió.
+#[derive(Debug, PartialEq, Eq)]
+enum Destinatario {
+    /// No se dijo a quién.
+    SinDecir,
+    /// Nunca le escribió, o no con ese nombre.
+    Desconocido,
+    /// Su nombre, como figura en los chats.
+    Uno(String),
+    /// El nombre coincide con varios chats: los que más mensajes tienen.
+    Varios(Vec<String>),
+}
+
+/// Las personas y los grupos a los que les escribió en un lugar (o en todos),
+/// con cuántos mensajes a cada uno.
+async fn chats(pool: &SqlitePool, lugar: Option<&str>) -> Resultado<Vec<(String, usize)>> {
+    let filas: Vec<(String, i64)> = sqlx::query_as(
+        "select para, count(*) from mensajes_propios
+         where para is not null and (?1 is null or lugar = ?1) group by para",
+    )
+    .bind(lugar)
+    .fetch_all(pool)
+    .await?;
+    Ok(filas.into_iter().map(|(para, n)| (para, usize::try_from(n).unwrap_or(0))).collect())
+}
+
+/// Busca a quién se refiere `dicho` entre los nombres de los chats. Vale el
+/// nombre entero, o que todas sus palabras estén enteras en el nombre: «Ana»
+/// es «Ana Trabajo», pero no «Mariana». Si coincide con más de uno no elige:
+/// lo que se le escribió a una persona no se muestra a nombre de otra.
+fn reconocer(dicho: &str, chats: &[(String, usize)]) -> Destinatario {
+    let pedidas = idioma::palabras(dicho);
+    if pedidas.is_empty() {
+        return Destinatario::SinDecir;
+    }
+    let mut coinciden: Vec<(&str, usize, bool)> = chats
+        .iter()
+        .filter_map(|(nombre, cuantos)| {
+            let suyas = idioma::palabras(nombre);
+            pedidas.iter().all(|pedida| suyas.contains(pedida)).then(|| (nombre.as_str(), *cuantos, suyas == pedidas))
+        })
+        .collect();
+    coinciden.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    if let Some((exacto, ..)) = coinciden.iter().find(|(.., exacto)| *exacto) {
+        return Destinatario::Uno((*exacto).to_owned());
+    }
+    match coinciden[..] {
+        [] => Destinatario::Desconocido,
+        [(unico, ..)] => Destinatario::Uno(unico.to_owned()),
+        _ => Destinatario::Varios(
+            coinciden.iter().take(CHATS_NOMBRADOS).map(|(nombre, ..)| (*nombre).to_owned()).collect(),
+        ),
+    }
+}
+
+/// El idioma en que más le escribe a alguien. Vacío si todo lo que le mandó
+/// es muy corto para saberlo.
+async fn idioma_con(pool: &SqlitePool, lugar: Option<&str>, para: &str) -> Resultado<String> {
+    let idioma: Option<String> = sqlx::query_scalar(
+        "select idioma from mensajes_propios
+         where para = ?2 and (?1 is null or lugar = ?1) and idioma <> ''
+         group by idioma order by count(*) desc, idioma limit 1",
+    )
+    .bind(lugar)
+    .bind(para)
+    .fetch_optional(pool)
+    .await?;
+    Ok(idioma.unwrap_or_default())
+}
+
+/// Marca con cuáles mensajes el usuario empezó o terminó una charla: los que
+/// tienen horas de silencio antes o después en su conversación. Vienen del
+/// más nuevo al más viejo. `completos` dice si están todos y no solo los más
+/// nuevos: recién ahí el más viejo de cada conversación es un comienzo.
+fn charlas(mensajes: &[Mensaje], completos: bool, ahora: DateTime<Utc>) -> Vec<Medido<'_>> {
+    let pausa = chrono::Duration::hours(HORAS_ENTRE_CHARLAS);
+    let mut medidos: Vec<Medido<'_>> =
+        mensajes.iter().map(|m| Medido { texto: &m.contenido, abre: false, cierra: false }).collect();
+    // De cada conversación, el último que se vio: el que le sigue en el tiempo.
+    let mut siguiente: HashMap<&str, usize> = HashMap::new();
+    for (i, m) in mensajes.iter().enumerate() {
+        let Some(conversacion) = m.conversacion.as_deref() else {
+            medidos[i] = Medido::suelto(&m.contenido);
+            continue;
+        };
+        match siguiente.insert(conversacion, i) {
+            // El más nuevo de su conversación: la terminó si después no escribió más.
+            None => medidos[i].cierra = ahora - m.fecha >= pausa,
+            Some(posterior) => {
+                let silencio = mensajes[posterior].fecha - m.fecha >= pausa;
+                medidos[posterior].abre = silencio;
+                medidos[i].cierra = silencio;
+            }
+        }
+    }
+    if completos {
+        for mas_viejo in siguiente.into_values() {
+            medidos[mas_viejo].abre = true;
+        }
+    }
+    medidos
+}
+
 /// Si una palabra parece un dato y no algo dicho: una cuenta, un teléfono,
 /// una clave.
 fn parece_un_dato(palabra: &str) -> bool {
@@ -300,32 +434,16 @@ fn sirve_de_ejemplo(contenido: &str) -> bool {
         && !contenido.split_whitespace().any(parece_un_dato)
 }
 
-/// Si un mensaje se le puede mostrar a quien pregunta. Lo que el usuario le
-/// mandó a alguien (por una mensajería, por correo) es de esa charla: se
-/// muestra solo cuando se pregunta cómo le escribe a esa persona o a ese
-/// grupo, y se sabe que era para ella. Lo que le escribió a Claude vale siempre.
-fn se_puede_mostrar(m: &Mensaje, para: Option<&str>) -> bool {
-    if !m.dirigido {
-        return true;
-    }
-    match (&m.para, para) {
-        (Some(destinatario), Some(pedido)) => idioma::plano(destinatario).contains(pedido),
-        _ => false,
-    }
-}
-
-/// Elige los mensajes que mejor sirven de ejemplo, entre los que se pueden
+/// Elige los mensajes que mejor sirven de ejemplo entre los que se pueden
 /// mostrar. Los del grupo de la conversación que pregunta van siempre antes
 /// que los de otros, que solo completan si faltan. Dentro de cada parte:
-/// primero lo que habla de lo mismo, y entre iguales lo más nuevo.
-fn elegir<'a>(mensajes: &'a [Mensaje], p: &Pedido<'_>, idioma: &str, cuantos: usize) -> Vec<&'a Mensaje> {
-    let para = p.para.map(|t| idioma::plano(t.trim())).filter(|t| !t.is_empty());
+/// primero lo que habla de lo mismo, y entre iguales, el orden en que vienen.
+fn elegir<'a>(mensajes: &[&'a Mensaje], p: &Pedido<'_>, idioma: &str, cuantos: usize) -> Vec<&'a Mensaje> {
     let sobre = p.sobre.map(texto::Consulta::de);
     let mut candidatos: Vec<(bool, usize, usize, &Mensaje)> = mensajes
         .iter()
         .enumerate()
         .filter(|(_, m)| m.idioma == idioma && sirve_de_ejemplo(&m.contenido))
-        .filter(|(_, m)| se_puede_mostrar(m, para.as_deref()))
         .map(|(orden, m)| {
             let mut puntos = 0;
             if let Some(sobre) = &sobre {
@@ -333,7 +451,7 @@ fn elegir<'a>(mensajes: &'a [Mensaje], p: &Pedido<'_>, idioma: &str, cuantos: us
                 puntos += sobre.coinciden(&texto::conjunto(&indexado));
             }
             let de_otro_grupo = p.grupo.is_some_and(|grupo| m.grupo_id != Some(grupo.id));
-            (de_otro_grupo, puntos, orden, m)
+            (de_otro_grupo, puntos, orden, *m)
         })
         .collect();
     candidatos.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
@@ -369,89 +487,191 @@ const SIN_MENSAJES: &str = "Todavía no aprendí cómo escribe el usuario: no te
 junta sola de sus conversaciones, a medida que escribe. Por ahora redactá con un tono neutro y preguntale si quiere \
 cambiar algo.";
 
-/// Lo que responde `memoria_estilo`: cómo escribe el usuario en un lugar y
-/// un idioma, y mensajes suyos de ejemplo.
-pub async fn consultar(pool: &SqlitePool, p: &Pedido<'_>) -> Resultado<String> {
-    let cuentas = cuentas(pool).await?;
-    if cuentas.is_empty() {
-        return Ok(SIN_MENSAJES.to_owned());
+/// Lo que hay que saber de a quién le va a escribir, si se dijo: que lo
+/// medido no es de esa persona, que no se sabe quién es, o cuál de varias.
+fn sobre_el_destinatario(d: &Destinatario, dicho: &str, suyos: usize, medido_con_el: bool) -> Option<String> {
+    match d {
+        Destinatario::SinDecir => None,
+        Destinatario::Uno(_) if medido_con_el => None,
+        Destinatario::Uno(nombre) if suyos == 0 => Some(format!(
+            "A «{nombre}» no le escribió en este idioma: lo de arriba es cómo escribe en general, no cómo le escribe \
+             a esa persona."
+        )),
+        Destinatario::Uno(nombre) => Some(format!(
+            "A «{nombre}» le escribió poco ({suyos} mensajes): lo de arriba es cómo escribe en general, no cómo le \
+             escribe a esa persona."
+        )),
+        Destinatario::Desconocido => Some(format!(
+            "No encontré a «{dicho}» entre las personas y los grupos a los que les escribió: lo de arriba es cómo \
+             escribe en general. Si en sus chats figura con otro nombre, pasá ese en `para`."
+        )),
+        Destinatario::Varios(nombres) => Some(format!(
+            "«{dicho}» coincide con varios chats suyos: {}. Pasá en `para` el nombre completo del que sea; mientras \
+             tanto, lo de arriba es cómo escribe en general.",
+            nombres.iter().map(|nombre| format!("«{nombre}»")).collect::<Vec<_>>().join(", ")
+        )),
     }
+}
+
+/// Lo que se junta para responder un pedido: de qué lugar, a quién, en qué
+/// idioma, y los mensajes de donde sale la respuesta.
+struct Reunido {
+    /// El lugar que se pidió, haya o no mensajes de ahí.
+    pedido: Option<String>,
+    /// Ese lugar, si hay mensajes suyos de ahí; si no, van todos juntos.
+    lugar: Option<String>,
+    destinatario: Destinatario,
+    idioma: String,
+    /// Los mensajes más nuevos del lugar.
+    general: Vec<Mensaje>,
+    /// Los que le mandó a la persona o al grupo a quien le va a escribir.
+    suyos: Vec<Mensaje>,
+}
+
+impl Reunido {
+    /// Si ya le escribió bastante a esa persona como para medir cómo le escribe a ella.
+    fn alcanza_con_los_suyos(&self) -> bool {
+        self.suyos.len() >= POCOS
+    }
+
+    /// Los mensajes sobre los que se mide.
+    fn medidos(&self) -> &[Mensaje] {
+        if self.alcanza_con_los_suyos() { &self.suyos } else { &self.general }
+    }
+}
+
+async fn reunir(pool: &SqlitePool, p: &Pedido<'_>, cuentas: &[(String, String, usize)]) -> Resultado<Reunido> {
     let pedido = p.lugar.map(leer_lugar).filter(|l| !l.is_empty());
-    let lugar = pedido.as_deref().filter(|l| cuentas.iter().any(|(conocido, _, _)| conocido == l));
-    let principal = idioma_principal(&cuentas, lugar);
+    let lugar = pedido.clone().filter(|l| cuentas.iter().any(|(conocido, _, _)| conocido == l));
+    let lugar_de = lugar.as_deref();
+    let destinatario = match p.para.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(dicho) => reconocer(dicho, &chats(pool, lugar_de).await?),
+        None => Destinatario::SinDecir,
+    };
+    // El idioma: el que se pidió; si no, el que usa con esa persona; si no, el del lugar.
+    let del_lugar = idioma_principal(cuentas, lugar_de);
+    let con_el = match &destinatario {
+        Destinatario::Uno(nombre) => Some(idioma_con(pool, lugar_de, nombre).await?).filter(|i| !i.is_empty()),
+        _ => None,
+    };
     let idioma = match p.idioma.map(str::trim).filter(|i| !i.is_empty()) {
-        None => principal.clone(),
+        None => con_el.clone().unwrap_or_else(|| del_lugar.clone()),
         Some(dicho) => match idioma::leer(dicho) {
             Some(codigo) => codigo.to_owned(),
             None => return uso(format!("No conozco el idioma «{dicho}»: pasá «es», «en» o «pt».")),
         },
     };
-    let mensajes = mensajes(pool, lugar, &idioma, idioma == principal).await?;
+    // Lo muy corto para tener idioma se mide junto con el idioma que más usa ahí (o con esa persona).
+    let general = mensajes(pool, lugar_de, &idioma, idioma == del_lugar, None).await?;
+    let suyos = match &destinatario {
+        Destinatario::Uno(nombre) => {
+            let principal = con_el.as_deref().unwrap_or(&del_lugar);
+            mensajes(pool, lugar_de, &idioma, idioma == principal, Some(nombre)).await?
+        }
+        _ => Vec::new(),
+    };
+    Ok(Reunido { pedido, lugar, destinatario, idioma, general, suyos })
+}
 
-    let donde = lugar.map_or_else(|| "todos los lugares juntos".to_owned(), str::to_owned);
-    let en = if idioma.is_empty() { String::new() } else { format!(" · {}", idioma::nombre(&idioma)) };
-    let mut salida = String::new();
-    if let (Some(pedido), None) = (&pedido, lugar) {
-        let _ = writeln!(
-            salida,
-            "No tengo mensajes suyos de «{pedido}»: lo de abajo sale de {}. Sirve para el vocabulario y el tono; \
-             las tildes, los signos y los saludos pueden ser otros ahí, así que ante la duda escribí con cuidado.\n",
-            lugares(&cuentas)
-        );
-    }
-    if mensajes.len() < MINIMO_PARA_PERFIL {
-        let cuantos = match mensajes.len() {
-            0 => "No tengo mensajes suyos".to_owned(),
-            1 => "Tengo un solo mensaje suyo".to_owned(),
-            n => format!("Tengo solo {n} mensajes suyos"),
-        };
-        let no_alcanza = if mensajes.is_empty() { "" } else { ": no alcanza para saber cómo escribe ahí" };
-        let _ = write!(
-            salida,
-            "{cuantos} en {} ({donde}){no_alcanza}. Tengo de: {}.",
-            idioma::nombre(&idioma),
-            lugares(&cuentas)
-        );
-        return Ok(salida);
-    }
-    let textos: Vec<&str> = mensajes.iter().map(|m| m.contenido.as_str()).collect();
-    let numeros = numeros::medir(&textos, &idioma);
-    let (primero, ultimo) = (mensajes.last().map(|m| m.fecha), mensajes.first().map(|m| m.fecha));
-    let _ = writeln!(
-        salida,
-        "Así escribe el usuario en {donde}{en} ({} mensajes suyos, del {} al {}):",
-        mensajes.len(),
-        primero.map(dia).unwrap_or_default(),
-        ultimo.map(dia).unwrap_or_default()
-    );
-    for linea in numeros::describir(&numeros, &idioma) {
-        let _ = writeln!(salida, "- {linea}");
-    }
-    if mensajes.len() < POCOS {
-        let _ = writeln!(salida, "Son pocos mensajes: tomalo como una pista, no como una regla.");
-    }
-
+/// Los ejemplos, o por qué no se muestra ninguno. De ejemplo va lo que le
+/// mandó a esa persona y lo que le escribió a Claude; lo que le mandó a otros
+/// es de esas charlas y no se muestra.
+fn escribir_ejemplos(salida: &mut String, r: &Reunido, p: &Pedido<'_>) {
+    let candidatos: Vec<&Mensaje> = r.suyos.iter().chain(r.general.iter().filter(|m| !m.dirigido)).collect();
     let cuantos = p.ejemplos.unwrap_or(EJEMPLOS_POR_DEFECTO).min(EJEMPLOS_MAXIMOS);
-    let elegidos = elegir(&mensajes, p, &idioma, cuantos);
+    let elegidos = elegir(&candidatos, p, &r.idioma, cuantos);
     if !elegidos.is_empty() {
         let _ = writeln!(salida, "\nMensajes suyos, para tomar el tono (no copies lo que dicen):");
         for (i, m) in elegidos.iter().enumerate() {
             let _ = writeln!(salida, "{}", ejemplo(m, i + 1, p));
         }
-    } else if mensajes.iter().any(|m| m.dirigido) {
+    } else if r.general.iter().any(|m| m.dirigido) {
+        let como = if r.destinatario == Destinatario::SinDecir {
+            " Decí a quién le va a escribir (`para`: el nombre de la persona o del grupo, como figura en sus chats)."
+        } else {
+            ""
+        };
         let _ = writeln!(
             salida,
-            "\nNo muestro mensajes suyos de ejemplo: lo que le mandó a alguien se ve solo si decís a quién le va a \
-             escribir (`para`: el nombre de la persona o del grupo) y ya le escribió antes."
+            "\nNo muestro mensajes suyos de ejemplo: lo que le mandó a alguien se ve solo cuando se sabe a quién le \
+             va a escribir y ya le escribió antes.{como}"
         );
     }
+}
+
+fn responder(r: &Reunido, p: &Pedido<'_>, cuentas: &[(String, String, usize)]) -> String {
+    let medidos = r.medidos();
+    let donde = r.lugar.clone().unwrap_or_else(|| "todos los lugares juntos".to_owned());
+    let mut salida = String::new();
+    if let (Some(pedido), None) = (&r.pedido, &r.lugar) {
+        let _ = writeln!(
+            salida,
+            "No tengo mensajes suyos de «{pedido}»: lo de abajo sale de {}. Sirve para el vocabulario y el tono; \
+             las tildes, los signos y los saludos pueden ser otros ahí, así que ante la duda escribí con cuidado.\n",
+            lugares(cuentas)
+        );
+    }
+    if medidos.len() < MINIMO_PARA_PERFIL {
+        let cuantos = match medidos.len() {
+            0 => "No tengo mensajes suyos".to_owned(),
+            1 => "Tengo un solo mensaje suyo".to_owned(),
+            n => format!("Tengo solo {n} mensajes suyos"),
+        };
+        let no_alcanza = if medidos.is_empty() { "" } else { ": no alcanza para saber cómo escribe ahí" };
+        let _ = write!(
+            salida,
+            "{cuantos} en {} ({donde}){no_alcanza}. Tengo de: {}.",
+            idioma::nombre(&r.idioma),
+            lugares(cuentas)
+        );
+        return salida;
+    }
+    let completos = i64::try_from(medidos.len()).is_ok_and(|n| n < MAXIMO_PARA_MEDIR);
+    let numeros = numeros::medir(&charlas(medidos, completos, base::ahora()), &r.idioma);
+    let quien = match &r.destinatario {
+        Destinatario::Uno(nombre) if r.alcanza_con_los_suyos() => {
+            format!("Así le escribe el usuario a «{nombre}» en {donde}")
+        }
+        _ => format!("Así escribe el usuario en {donde}"),
+    };
+    let en = if r.idioma.is_empty() { String::new() } else { format!(" · {}", idioma::nombre(&r.idioma)) };
+    let _ = writeln!(
+        salida,
+        "{quien}{en} ({} mensajes suyos, del {} al {}):",
+        medidos.len(),
+        medidos.last().map(|m| dia(m.fecha)).unwrap_or_default(),
+        medidos.first().map(|m| dia(m.fecha)).unwrap_or_default()
+    );
+    for linea in numeros::describir(&numeros, &r.idioma) {
+        let _ = writeln!(salida, "- {linea}");
+    }
+    if medidos.len() < POCOS {
+        let _ = writeln!(salida, "Son pocos mensajes: tomalo como una pista, no como una regla.");
+    }
+    let dicho = p.para.map(str::trim).unwrap_or_default();
+    if let Some(aviso) = sobre_el_destinatario(&r.destinatario, dicho, r.suyos.len(), r.alcanza_con_los_suyos()) {
+        let _ = writeln!(salida, "\n{aviso}");
+    }
+    escribir_ejemplos(&mut salida, r, p);
     let _ = write!(
         salida,
         "\nEscribí como él: el mismo largo, las mismas mayúsculas, tildes y signos, y sus expresiones. Vale para lo \
          que va a salir con su nombre; con él seguí hablando como siempre. Tengo mensajes suyos de: {}.",
-        lugares(&cuentas)
+        lugares(cuentas)
     );
-    Ok(salida)
+    salida
+}
+
+/// Lo que responde `memoria_estilo`: cómo escribe el usuario en un lugar y
+/// un idioma (o cómo le escribe a una persona, si ya le escribió bastante), y
+/// mensajes suyos de ejemplo.
+pub async fn consultar(pool: &SqlitePool, p: &Pedido<'_>) -> Resultado<String> {
+    let cuentas = cuentas(pool).await?;
+    if cuentas.is_empty() {
+        return Ok(SIN_MENSAJES.to_owned());
+    }
+    let reunido = reunir(pool, p, &cuentas).await?;
+    Ok(responder(&reunido, p, &cuentas))
 }
 
 #[cfg(test)]
@@ -475,6 +695,81 @@ mod pruebas {
             assert!(!sirve_de_ejemplo(no), "{no}");
         }
         assert!(!sirve_de_ejemplo(&"palabra ".repeat(60)));
+    }
+
+    #[test]
+    fn reconoce_a_quien_se_le_escribe_por_su_nombre_entero() {
+        let chats: Vec<(String, usize)> =
+            [("Ana Trabajo", 40), ("Mariana", 90), ("Equipo ACME", 12), ("Luis Pérez", 7), ("Luis Gómez", 30)]
+                .into_iter()
+                .map(|(nombre, cuantos)| (nombre.to_owned(), cuantos))
+                .collect();
+        // «Ana» es «Ana Trabajo», no «Mariana», aunque a Mariana le escribió más.
+        assert_eq!(reconocer("ana", &chats), Destinatario::Uno("Ana Trabajo".into()));
+        assert_eq!(reconocer(" MARIANA ", &chats), Destinatario::Uno("Mariana".into()));
+        assert_eq!(reconocer("el equipo de acme", &chats), Destinatario::Desconocido, "sobran palabras");
+        assert_eq!(reconocer("acme equipo", &chats), Destinatario::Uno("Equipo ACME".into()));
+        assert_eq!(reconocer("luis perez", &chats), Destinatario::Uno("Luis Pérez".into()));
+        // Con más de uno no elige: los nombra, primero aquel al que más le escribió.
+        assert_eq!(reconocer("Luis", &chats), Destinatario::Varios(vec!["Luis Gómez".into(), "Luis Pérez".into()]));
+        assert_eq!(reconocer("Marta", &chats), Destinatario::Desconocido);
+        assert_eq!(reconocer(" ¿? ", &chats), Destinatario::SinDecir);
+        // El nombre entero gana aunque otro chat también lo contenga.
+        let con_grupo = [("Ana".to_owned(), 3), ("Ana y Luis".to_owned(), 50)];
+        assert_eq!(reconocer("Ana", &con_grupo), Destinatario::Uno("Ana".into()));
+    }
+
+    fn mensaje(conversacion: Option<&str>, hace_horas: i64, contenido: &str) -> Mensaje {
+        Mensaje {
+            lugar: "whatsapp".into(),
+            idioma: "es".into(),
+            dirigido: true,
+            conversacion: conversacion.map(Into::into),
+            para: None,
+            fecha: DateTime::UNIX_EPOCH + chrono::Duration::hours(1000 - hace_horas),
+            contenido: contenido.into(),
+            grupo_id: None,
+            grupo: None,
+        }
+    }
+
+    #[test]
+    fn marca_donde_empieza_y_donde_termina_cada_charla() {
+        let ahora = DateTime::UNIX_EPOCH + chrono::Duration::hours(1000);
+        // Del más nuevo al más viejo, como vienen de la base.
+        let mensajes = [
+            mensaje(Some("a"), 1, "listo, gracias"),
+            mensaje(Some("b"), 2, "dale"),
+            mensaje(Some("a"), 3, "hola, tenes un minuto?"),
+            mensaje(Some("a"), 30, "nos vemos"),
+            mensaje(Some("a"), 31, "buenas, como va?"),
+            mensaje(None, 40, "Hola: te escribo por la factura. Saludos."),
+        ];
+        let marcas = |completos| -> Vec<(bool, bool)> {
+            charlas(&mensajes, completos, ahora).iter().map(|m| (m.abre, m.cierra)).collect()
+        };
+        assert_eq!(
+            marcas(false),
+            [
+                // El último de «a» es de hace una hora: todavía puede seguir.
+                (false, false),
+                (false, false),
+                // Arrancó de nuevo después de más de un día de silencio…
+                (true, false),
+                // …y con el anterior había terminado la charla de antes.
+                (false, true),
+                // Sin saber qué hubo antes, el más viejo no cuenta como comienzo.
+                (false, false),
+                // Lo que no es de ninguna conversación es una charla entera.
+                (true, true),
+            ]
+        );
+        // Con todos los mensajes a la vista, el más viejo de cada conversación sí es un comienzo.
+        let completos = marcas(true);
+        assert_eq!((completos[1], completos[4]), ((true, false), (true, false)));
+        // Pasadas las horas, el más nuevo también cerró su charla.
+        let despues = charlas(&mensajes, false, ahora + chrono::Duration::hours(HORAS_ENTRE_CHARLAS));
+        assert!(despues[0].cierra && despues[1].cierra);
     }
 
     #[test]

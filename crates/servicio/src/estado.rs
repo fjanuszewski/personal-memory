@@ -2,7 +2,7 @@
 //! memoria, quien las calcula y los umbrales de calidad.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::time::Duration;
 
 use sqlx::SqlitePool;
@@ -59,6 +59,10 @@ pub struct Estado {
     /// Las fuentes encendidas para aprender cómo escribe el usuario, aparte
     /// de sus conversaciones con Claude.
     pub fuentes: Arc<Fuentes>,
+    /// Desde cuándo (segundos desde 1970) el servicio está leyendo esas
+    /// fuentes; cero si no está leyendo. La lectura puede quedar esperando a
+    /// que el usuario le conteste a macOS si la deja.
+    pub leyendo_fuentes: Arc<AtomicI64>,
     salud_huellas: Arc<AtomicU8>,
 }
 
@@ -73,6 +77,7 @@ impl Estado {
             nombre: Arc::from(NOMBRE_POR_DEFECTO),
             pendientes: Arc::new(Notify::new()),
             fuentes: Arc::new(Fuentes::default()),
+            leyendo_fuentes: Arc::new(AtomicI64::new(0)),
             salud_huellas: Arc::new(AtomicU8::new(SIN_PROBAR)),
         }
     }

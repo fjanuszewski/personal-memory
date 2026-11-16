@@ -229,7 +229,8 @@ pub struct PedidoEstilo {
     /// El idioma en que vas a escribir («es», «en», «pt»). Sin esto, el que más usa en ese lugar.
     #[serde(default)]
     pub idioma: Option<String>,
-    /// A quién le va a escribir, si se sabe: trae primero lo que le escribió a esa persona.
+    /// A quién le va a escribir, si se sabe: el nombre de la persona o del grupo, como figura en sus chats. Si
+    /// ya le escribió bastante, mide cómo le escribe a ella, y trae de ejemplo mensajes que le mandó.
     #[serde(default)]
     pub para: Option<String>,
     /// De qué trata lo que vas a escribir: trae primero mensajes suyos sobre eso.
@@ -260,7 +261,14 @@ pub async fn estilo(e: &Estado, p: &PedidoEstilo) -> Resultado<String> {
         ejemplos: p.ejemplos.and_then(|n| usize::try_from(n).ok()),
         grupo: grupo.as_ref(),
     };
-    estilo::consultar(&e.pool, &pedido).await
+    let mut respuesta = estilo::consultar(&e.pool, &pedido).await?;
+    // Si hay una fuente encendida que no se pudo leer, o que espera el
+    // permiso del usuario, que quien pregunta se entere.
+    if let Some(aviso) = estilo::fuentes::aviso(e).await? {
+        respuesta.push_str("\n\n");
+        respuesta.push_str(&aviso);
+    }
+    Ok(respuesta)
 }
 
 pub async fn contexto(e: &Estado, p: &PedidoContexto) -> Resultado<String> {
@@ -566,8 +574,6 @@ pub async fn mejora_estado(e: &Estado, p: &PedidoEstado) -> Resultado<String> {
             "con_agente": avisos.con_agente,
             // Si el paso que traía el pedido valió; null si no traía ninguno.
             "paso": valio,
-            // Si toca leer las fuentes encendidas: el programa que el mod tiene que correr; si no, null.
-            "juntar": por_juntar(e).await?,
         })
         .to_string());
     }
@@ -612,17 +618,6 @@ pub async fn mejora_estado(e: &Estado, p: &PedidoEstado) -> Resultado<String> {
         ),
         EstadoMejora::Rechazada => format!("Mejora {id}: el usuario la rechazó."),
     })
-}
-
-/// Si hay fuentes encendidas y ya toca leerlas, el programa que las lee:
-/// este mismo, con la orden `juntar`. Lo corre el mod desde Claude Code, que
-/// es a quien el sistema le da (o no) permiso para ver los datos de otras
-/// aplicaciones.
-async fn por_juntar(e: &Estado) -> Resultado<Option<String>> {
-    if !estilo::fuentes::toca(&e.pool, &e.fuentes).await? {
-        return Ok(None);
-    }
-    Ok(std::env::current_exe().ok().and_then(|programa| programa.to_str().map(str::to_owned)))
 }
 
 /// Espera, hasta `limite`, a que el guardián deje lista la copia de una mejora

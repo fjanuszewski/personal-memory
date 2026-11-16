@@ -2,7 +2,6 @@ use std::fs;
 
 use anyhow::Context;
 use memoria::config::Config;
-use memoria::estilo::fuentes::Modo;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::filter::LevelFilter;
@@ -45,15 +44,15 @@ async fn main() -> anyhow::Result<()> {
             println!("memoria {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-        // Lo que corre el mod desde Claude Code: lee las fuentes encendidas y sale.
+        // Para hacer a mano lo que el servicio hace solo cada unas horas: lee
+        // ahora las fuentes encendidas y sale. Con «--probar» no guarda nada.
         Some("juntar") => {
-            let modo = match std::env::args().nth(2).as_deref() {
-                None => Modo::SiToca,
-                Some("--ya") => Modo::Ya,
-                Some("--probar") => Modo::Probar,
-                Some(otro) => anyhow::bail!("«juntar» no conoce «{otro}»: va solo, con «--ya» o con «--probar»"),
+            let probar = match std::env::args().nth(2).as_deref() {
+                None => false,
+                Some("--probar") => true,
+                Some(otro) => anyhow::bail!("«juntar» no conoce «{otro}»: va solo o con «--probar»"),
             };
-            let (bien, resumen) = memoria::juntar(&cfg, modo).await?;
+            let (bien, resumen) = memoria::juntar(&cfg, probar).await?;
             println!("{resumen}");
             if !bien {
                 std::process::exit(1);

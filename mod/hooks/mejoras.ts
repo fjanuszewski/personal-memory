@@ -23,24 +23,6 @@ export type EstadoMejoras = {
   paraAgente: Encargo[]
   /** Las mejoras cuyo agente, para el servicio, corre en esta conversación. */
   conAgente: number[]
-  /**
-   * Si toca leer las fuentes que el usuario encendió (docs/diseno.md, 4.11):
-   * el programa que hay que correr. Si no toca, null.
-   */
-  juntar: string | null
-}
-
-/**
- * El programa que lee las fuentes, si lo que dice el servicio es eso y nada
- * más: la ruta completa de un programa que se llama `memoria`. Lo va a correr
- * el mod, así que no se acepta cualquier cosa.
- */
-export function programaParaJuntar(x: unknown): string | null {
-  if (typeof x !== 'string') return null
-  const partes = x.split('/')
-  const completa = x.startsWith('/') && !partes.includes('..') && !partes.includes('.')
-
-  return completa && partes.at(-1) === 'memoria' && x === x.trim() ? x : null
 }
 
 const esNumero = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
@@ -54,11 +36,9 @@ export function leerEstado(texto: string): EstadoMejoras {
     avisos,
     para_agente: paraAgente,
     con_agente: conAgente,
-    juntar,
-  } = crudo as { en_curso?: unknown; avisos?: unknown; para_agente?: unknown; con_agente?: unknown; juntar?: unknown }
+  } = crudo as { en_curso?: unknown; avisos?: unknown; para_agente?: unknown; con_agente?: unknown }
 
   return {
-    juntar: programaParaJuntar(juntar),
     enCurso: Array.isArray(enCurso) ? enCurso.filter(esNumero) : [],
     paraAgente: (Array.isArray(paraAgente) ? paraAgente : []).flatMap((a: unknown) => aEncargo(a) ?? []),
     conAgente: Array.isArray(conAgente) ? conAgente.filter(esNumero) : [],

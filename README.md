@@ -93,12 +93,13 @@ MEMORIA_FUENTES=whatsapp instalacion/instalar.sh
 MEMORIA_FUENTES=whatsapp MEMORIA_WHATSAPP_SIN="Familia;Los del colegio" instalacion/instalar.sh
 ```
 
-- Lee la base local de WhatsApp Desktop, siempre sobre una copia que vive unos segundos y se borra. La base de la aplicación no se abre ni se toca.
-- Entran solo los mensajes de texto que mandaste vos, en chats con personas y en grupos. No entran los de los demás, las fotos ni los audios, los estados, los canales, lo que reenviaste (lo que habías recibido antes palabra por palabra) ni los chats que dejaste afuera.
+- La lee el servicio, solo: un minuto después de arrancar y después cada 6 horas. Trabaja siempre sobre una copia de la base local de WhatsApp Desktop, que vive unos segundos y se borra. La base de la aplicación no se toca.
+- Entran solo los mensajes de texto que mandaste vos, en chats con personas y en grupos. No entran los de los demás, las fotos ni los audios, los estados, los canales, lo que reenviaste (lo que la aplicación marca como reenviado, y lo que habías recibido antes palabra por palabra) ni los chats que dejaste afuera.
 - De cada chat queda su nombre y una marca. Los números de teléfono no se guardan: un contacto sin agendar queda sin nombre.
-- **macOS te va a preguntar una vez** si dejás que Claude Code vea los datos de otras aplicaciones. Por eso no lo lee el servicio, que corre de fondo, sino el mod: cuando toca (cada unas horas, al abrir una conversación) corre `memoria juntar` desde Claude Code. Si decís que no, o no contestás, no insiste hasta el otro día.
-- Lo que le mandaste a alguien se usa para medir, pero **como ejemplo se muestra solo cuando Claude dice a quién le vas a escribir** y ya le habías escrito: nunca aparecen mensajes de un chat en otro.
-- Para ver qué entraría sin guardar nada: `~/.memoria/bin/memoria juntar --probar`. Para apagarla: `MEMORIA_FUENTES=ninguna instalacion/instalar.sh`.
+- **macOS puede preguntarte** si dejás que «memoria» acceda a los datos de otras apps. Ese permiso dura mientras el programa siga andando, así que lo puede volver a preguntar cuando el servicio arranca de nuevo (al reiniciar la Mac o al actualizar la memoria). Mientras no contestes, la lectura queda esperando y no se pide otra. Si decís que no, se vuelve a intentar al otro día y en el próximo arranque. Si Claude te pide el estilo mientras tanto, la memoria le avisa que está esperando tu permiso.
+- **Cómo le escribís a cada uno.** Si Claude dice a quién le vas a escribir y ya le mandaste 30 mensajes o más, mide cómo le escribís a esa persona o a ese grupo, que no siempre es como le escribís al resto. Los saludos se cuentan donde empieza una charla (después de 6 horas sin escribirle), no en cada mensaje.
+- Lo que le mandaste a alguien se muestra como ejemplo **solo cuando Claude dice a quién le vas a escribir** y ya le habías escrito: nunca aparecen mensajes de un chat en otro. El nombre tiene que ser el del chat, entero o con palabras enteras («Ana» es «Ana Trabajo», no «Mariana»); si coincide con más de un chat, no elige: los nombra y no muestra mensajes de ninguno.
+- Para ver qué entraría sin guardar nada: `~/.memoria/bin/memoria juntar --probar`. Para leer ahora, sin esperar al servicio: `~/.memoria/bin/memoria juntar`. Para apagarla: `MEMORIA_FUENTES=ninguna instalacion/instalar.sh`.
 
 **Qué deja afuera.** En una conversación con Claude no todo lo que figura como tuyo lo escribiste vos, así que se queda nada más con lo que es claramente tuyo y, ante la duda, corta:
 

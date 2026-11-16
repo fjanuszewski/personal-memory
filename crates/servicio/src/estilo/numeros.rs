@@ -22,6 +22,9 @@ const NOMBRADAS: usize = 6;
 const REPETIDA: usize = 2;
 /// Las últimas palabras de un mensaje, donde se busca la despedida.
 const COLA: usize = 4;
+/// Desde qué parte de los mensajes (por ciento) vale la pena nombrar los
+/// emojis: los de alguien que casi no los usa no dicen nada de cómo escribe.
+const EMOJIS_HABITUALES: usize = 10;
 
 /// Contracciones del inglés que se reconocen aunque falte el apóstrofo.
 const SIN_APOSTROFO: &[&str] = &["dont", "isnt", "doesnt", "didnt", "im", "ive", "youre", "thats"];
@@ -31,6 +34,24 @@ const ARRANQUES_SIN_INTERES: &[&str] = &[
     "el", "la", "los", "las", "un", "una", "de", "en", "a", "the", "an", "in", "on", "o", "os", "as", "que", "no",
     "si", "es", "se", "lo", "me", "te", "por", "para", "con", "i", "it", "is", "to",
 ];
+
+/// Un mensaje para medir, y si con él el usuario empezó o terminó una charla:
+/// el saludo se busca donde se empieza y la despedida donde se termina, no en
+/// cada mensaje del medio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Medido<'a> {
+    pub texto: &'a str,
+    pub abre: bool,
+    pub cierra: bool,
+}
+
+impl<'a> Medido<'a> {
+    /// Un mensaje que es toda la charla, como un correo.
+    #[must_use]
+    pub const fn suelto(texto: &'a str) -> Self {
+        Self { texto, abre: true, cierra: true }
+    }
+}
 
 /// «Tantas veces de tantas».
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -82,7 +103,9 @@ pub struct Numeros {
     pub arranques: Vec<(String, usize)>,
     pub muletillas: Vec<(String, usize)>,
     pub prestadas: Vec<(String, usize)>,
+    /// De las veces que empezó una charla, en cuántas saludó.
     pub saludos: Parte,
+    /// De las veces que la terminó, en cuántas agradeció o se despidió.
     pub despedidas: Parte,
 }
 
@@ -236,7 +259,7 @@ fn medir_ingles(n: &mut Numeros, texto: &str, palabras: &[String]) {
 }
 
 /// Con qué arranca, qué expresiones repite y cómo saluda y se despide.
-fn medir_expresiones(n: &mut Numeros, cuentas: &mut Cuentas, palabras: &[String], idioma: &str) {
+fn medir_expresiones(n: &mut Numeros, cuentas: &mut Cuentas, palabras: &[String], idioma: &str, m: &Medido<'_>) {
     if palabras.len() >= 2
         && let Some(primera) = palabras.first()
         && primera.chars().all(char::is_alphabetic)
@@ -254,19 +277,27 @@ fn medir_expresiones(n: &mut Numeros, cuentas: &mut Cuentas, palabras: &[String]
             *cuentas.prestadas.entry(palabra.clone()).or_default() += 1;
         }
     }
-    n.saludos.sumar(lexico::de_idioma(SALUDOS, idioma).iter().any(|s| sigue(palabras, 0, s)));
-    let cola = &palabras[palabras.len().saturating_sub(COLA)..];
-    n.despedidas.sumar(lexico::de_idioma(DESPEDIDAS, idioma).iter().any(|d| contiene(cola, d)));
+    if m.abre {
+        n.saludos.sumar(lexico::de_idioma(SALUDOS, idioma).iter().any(|s| sigue(palabras, 0, s)));
+    }
+    if m.cierra {
+        let cola = &palabras[palabras.len().saturating_sub(COLA)..];
+        n.despedidas.sumar(lexico::de_idioma(DESPEDIDAS, idioma).iter().any(|d| contiene(cola, d)));
+    }
 }
 
 /// Mide los mensajes de un idioma («es», «en», «pt»; con otro, solo lo que
 /// vale para cualquiera).
 #[must_use]
-pub fn medir(mensajes: &[&str], idioma: &str) -> Numeros {
+pub fn medir(mensajes: &[Medido<'_>], idioma: &str) -> Numeros {
     let mut n = Numeros { mensajes: mensajes.len(), ..Numeros::default() };
     let mut cuentas = Cuentas::default();
     let mut largos: Vec<usize> = Vec::with_capacity(mensajes.len());
-    for texto in mensajes.iter().map(|m| m.trim()).filter(|m| !m.is_empty()) {
+    for m in mensajes {
+        let texto = m.texto.trim();
+        if texto.is_empty() {
+            continue;
+        }
         let palabras = idioma::palabras(texto);
         largos.push(texto.split_whitespace().count());
         medir_forma(&mut n, texto);
@@ -277,7 +308,7 @@ pub fn medir(mensajes: &[&str], idioma: &str) -> Numeros {
             "en" => medir_ingles(&mut n, texto, &palabras),
             _ => {}
         }
-        medir_expresiones(&mut n, &mut cuentas, &palabras, idioma);
+        medir_expresiones(&mut n, &mut cuentas, &palabras, idioma, m);
     }
     largos.sort_unstable();
     if let Some(ultimo) = largos.len().checked_sub(1) {
@@ -392,10 +423,11 @@ pub fn describir(n: &Numeros, idioma: &str) -> Vec<String> {
         lineas.push(format!("Coma sin espacio después: {f}."));
     }
     if let Some(f) = frecuencia(n.emojis) {
-        let cuales = if n.emojis_frecuentes.is_empty() {
-            String::new()
-        } else {
+        let habituales = n.emojis.porcentaje().is_some_and(|parte| parte >= EMOJIS_HABITUALES);
+        let cuales = if habituales && !n.emojis_frecuentes.is_empty() {
             format!(" Los que más usa: {}.", nombradas(&n.emojis_frecuentes))
+        } else {
+            String::new()
         };
         lineas.push(format!("Emojis: {f}.{cuales}"));
     }
@@ -409,10 +441,10 @@ pub fn describir(n: &Numeros, idioma: &str) -> Vec<String> {
         lineas.push(format!("Palabras en inglés que mete: {}.", nombradas(&n.prestadas)));
     }
     if let Some(f) = frecuencia(n.saludos) {
-        lineas.push(format!("Saluda al empezar: {f}."));
+        lineas.push(format!("Saluda al empezar una charla: {f}."));
     }
     if let Some(f) = frecuencia(n.despedidas) {
-        lineas.push(format!("Agradece o se despide al final: {f}."));
+        lineas.push(format!("Agradece o se despide al terminarla: {f}."));
     }
     lineas
 }
@@ -420,6 +452,11 @@ pub fn describir(n: &Numeros, idioma: &str) -> Vec<String> {
 #[cfg(test)]
 mod pruebas {
     use super::*;
+
+    /// Cada mensaje como una charla entera.
+    fn sueltos<'a>(textos: &[&'a str]) -> Vec<Medido<'a>> {
+        textos.iter().map(|texto| Medido::suelto(texto)).collect()
+    }
 
     const RAPIDOS: &[&str] = &[
         "Hace falta todo esto? no alcanza con lo que ya hay?",
@@ -433,7 +470,7 @@ mod pruebas {
 
     #[test]
     fn mide_a_quien_escribe_rapido_y_sin_tildes() {
-        let n = medir(RAPIDOS, "es");
+        let n = medir(&sueltos(RAPIDOS), "es");
         assert_eq!(n.mensajes, 7);
         assert_eq!(n.un_renglon, Parte { veces: 7, de: 7 });
         // Solo el primero empieza con mayúscula.
@@ -468,7 +505,7 @@ mod pruebas {
             "Hola, ¿tienes un minuto? Dime cuándo puedes y hazlo con calma. ¿Quieres que te llame?",
             "¿Tú puedes mañana? Eres el único que lo sabe.",
         ];
-        let n = medir(&cuidados, "es");
+        let n = medir(&sueltos(&cuidados), "es");
         // El último empieza con «¿»: cuenta la primera letra.
         assert_eq!(n.empieza_con_mayuscula, Parte { veces: 6, de: 6 });
         assert_eq!(n.abre_preguntas.veces, n.abre_preguntas.de);
@@ -479,7 +516,28 @@ mod pruebas {
         assert!(n.tuteo >= 5 && n.voseo == 0, "{} / {}", n.tuteo, n.voseo);
         let dicho = describir(&n, "es").join("\n");
         assert!(dicho.contains("Trato: de tú"), "{dicho}");
-        assert!(dicho.contains("Saluda al empezar: casi siempre (5 de 6)."), "{dicho}");
+        assert!(dicho.contains("Saluda al empezar una charla: casi siempre (5 de 6)."), "{dicho}");
+    }
+
+    #[test]
+    fn el_saludo_se_mide_donde_empieza_la_charla() {
+        // Una charla de seis mensajes: saluda en el primero y agradece en el último.
+        let charla =
+            ["hola, como va?", "te queria preguntar algo", "tenes el link?", "ah ya lo vi", "joya", "gracias!"];
+        let mut medidos = sueltos(&charla);
+        for (i, m) in medidos.iter_mut().enumerate() {
+            m.abre = i == 0;
+            m.cierra = i == charla.len() - 1;
+        }
+        // Cinco charlas iguales: saludó las cinco veces que empezó, no «una de cada seis».
+        let cinco: Vec<Medido<'_>> = (0..5).flat_map(|_| medidos.clone()).collect();
+        let n = medir(&cinco, "es");
+        assert_eq!(n.mensajes, 30);
+        assert_eq!(n.saludos, Parte { veces: 5, de: 5 });
+        assert_eq!(n.despedidas, Parte { veces: 5, de: 5 });
+        let dicho = describir(&n, "es").join("\n");
+        assert!(dicho.contains("Saluda al empezar una charla: siempre (5 de 5)."), "{dicho}");
+        assert!(dicho.contains("Agradece o se despide al terminarla: siempre (5 de 5)."), "{dicho}");
     }
 
     #[test]
@@ -491,7 +549,7 @@ mod pruebas {
             "ok 🙂 🚀",
             "1,5 no cuenta como coma sin espacio",
         ];
-        let n = medir(&mensajes, "es");
+        let n = medir(&sueltos(&mensajes), "es");
         assert_eq!(n.espacio_doble.veces, 1);
         // De los cuatro mensajes que tienen algún signo.
         assert_eq!(n.espacio_antes_de_signo, Parte { veces: 1, de: 4 });
@@ -500,6 +558,12 @@ mod pruebas {
         assert_eq!(n.puntos_suspensivos.veces, 1);
         assert_eq!(n.emojis, Parte { veces: 3, de: 5 });
         assert_eq!(n.emojis_frecuentes, vec![("🙂".to_owned(), 3)]);
+        assert!(describir(&n, "es").join("\n").contains("Los que más usa: «🙂» (3)."));
+        // De alguien que casi no usa emojis no se nombra ninguno.
+        let mut casi_sin: Vec<&str> = vec!["dale, despues lo vemos"; 40];
+        casi_sin.extend(["joya 🙂", "listo 🙂"]);
+        let pocos = describir(&medir(&sueltos(&casi_sin), "es"), "es").join("\n");
+        assert!(pocos.contains("Emojis: casi nunca (2 de 42).") && !pocos.contains("Los que más usa"), "{pocos}");
     }
 
     #[test]
@@ -511,7 +575,7 @@ mod pruebas {
             "hey, im not sure about its name",
             "hi, can you review it? cheers",
         ];
-        let n = medir(&mensajes, "en");
+        let n = medir(&sueltos(&mensajes), "en");
         // don't, it's, thats, im frente a «do not»; el «its» sin apóstrofo no cuenta.
         assert_eq!(n.contracciones, Parte { veces: 4, de: 5 });
         assert_eq!(n.yo_en_minuscula, Parte { veces: 2, de: 3 });
@@ -533,7 +597,7 @@ mod pruebas {
         assert_eq!(frecuencia(Parte { veces: 0, de: 700 }).unwrap(), "nunca (0 de 700)");
         assert_eq!(frecuencia(Parte { veces: 3, de: 4 }), None);
         // Con pocos casos no saca porcentajes.
-        let pocos = medir(&["hola", "ok"], "es");
+        let pocos = medir(&sueltos(&["hola", "ok"]), "es");
         assert_eq!(pocos.un_renglon.porcentaje(), None);
         assert_eq!(describir(&pocos, "es").len(), 1, "solo el largo");
     }

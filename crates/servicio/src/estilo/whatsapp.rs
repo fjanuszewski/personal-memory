@@ -7,10 +7,11 @@
 //! demás no se guarda nunca. Tampoco los números de teléfono: de cada chat
 //! queda su nombre y una marca que no dice de quién es.
 //!
-//! macOS protege los datos de las otras aplicaciones y la primera vez le
-//! pregunta al usuario si deja leerlos. Por eso esto no lo hace el servicio,
-//! que corre de fondo y cambia de identidad con cada versión, sino
-//! `memoria juntar`, que lo corre Claude Code a pedido del mod.
+//! macOS protege los datos de las otras aplicaciones: puede frenar la lectura
+//! hasta que el usuario conteste un cartel, y ese permiso dura lo que vive el
+//! programa que lo pidió. Por eso lee el servicio, que vive días, y no cada
+//! conversación de Claude; y por eso la copia se hace en un hilo aparte, que
+//! puede quedar esperando la respuesta todo lo que haga falta.
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -37,6 +38,10 @@ const TANDA: i64 = 50_000;
 /// Un texto recibido más corto que esto lo puede escribir cualquiera
 /// («dale, nos vemos»): no alcanza para decir que el usuario lo reenvió.
 const REENVIO_MINIMO: usize = 20;
+/// Las banderas con que la aplicación marca un mensaje reenviado (los bits
+/// 0x80 y 0x100 de `ZFLAGS`). No está documentado: sale de comparar, en una
+/// base real, los mensajes que las llevan con los textos recibidos antes.
+const REENVIADO: i64 = 0x180;
 /// Cómo terminan los nombres internos de los chats de verdad: con una
 /// persona, de grupo, o con alguien cuyo número no se ve. Los estados, las
 /// listas de difusión y los canales terminan de otra forma y no se leen.
@@ -64,6 +69,12 @@ struct Copia {
 impl Copia {
     fn de(base: &Path) -> anyhow::Result<Self> {
         static CUENTA: AtomicU32 = AtomicU32::new(0);
+        // Primero se pide la base: si macOS frena la lectura, queda esperando
+        // acá, antes de haber creado nada.
+        drop(
+            std::fs::File::open(base)
+                .with_context(|| format!("no pude leer la base de WhatsApp ({})", base.display()))?,
+        );
         let numero = CUENTA.fetch_add(1, Ordering::Relaxed);
         let carpeta = std::env::temp_dir().join(format!("memoria-whatsapp-{}-{numero}", std::process::id()));
         let _ = std::fs::remove_dir_all(&carpeta);
@@ -143,13 +154,28 @@ async fn recibidos(whatsapp: &SqlitePool) -> sqlx::Result<HashMap<String, f64>> 
     Ok(primeras)
 }
 
-type Fila = (i64, String, f64, Option<String>, Option<String>);
+/// Copia la base en un hilo propio. Si macOS frena la lectura hasta que el
+/// usuario conteste su cartel, el hilo espera lo que haga falta sin trabar al
+/// resto del programa ni a su apagado.
+async fn copiar(base: PathBuf) -> anyhow::Result<Copia> {
+    let (listo, espera) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("copia-whatsapp".to_owned())
+        .spawn(move || {
+            // Si ya nadie espera, la copia se borra sola al soltarla.
+            let _ = listo.send(Copia::de(&base));
+        })
+        .context("no pude lanzar la copia de la base de WhatsApp")?;
+    espera.await.context("se cortó la copia de la base de WhatsApp")?
+}
+
+type Fila = (i64, String, f64, i64, Option<String>, Option<String>);
 
 /// Los mensajes de texto que mandó el usuario, desde el que sigue a `desde`.
 async fn mandados(whatsapp: &SqlitePool, desde: i64) -> sqlx::Result<Vec<Fila>> {
     sqlx::query_as(
         "select cast(m.Z_PK as integer), cast(m.ZTEXT as text), coalesce(cast(m.ZMESSAGEDATE as real), 0.0),
-                cast(c.ZPARTNERNAME as text), cast(c.ZCONTACTJID as text)
+                coalesce(cast(m.ZFLAGS as integer), 0), cast(c.ZPARTNERNAME as text), cast(c.ZCONTACTJID as text)
          from ZWAMESSAGE m join ZWACHATSESSION c on c.Z_PK = m.ZCHATSESSION
          where m.ZISFROMME = 1 and m.ZMESSAGETYPE = 0 and m.ZTEXT is not null and m.ZTEXT <> '' and m.Z_PK > ?1
          order by m.Z_PK limit ?2",
@@ -187,15 +213,17 @@ async fn juntar_de(
         let tanda = mandados(whatsapp, ultimo).await.context("la base de WhatsApp no tiene la forma esperada")?;
         let Some((mayor, ..)) = tanda.last() else { break };
         ultimo = *mayor;
-        for (_, texto, segundos, chat, interno) in &tanda {
+        for (_, texto, segundos, banderas, chat, interno) in &tanda {
             if !es_chat(interno.as_deref()) || excluido(chat.as_deref(), &cfg.sin) {
                 continue;
             }
             juntado.leidos += 1;
             let texto = texto.trim();
-            let reenviado = texto.chars().count() >= REENVIO_MINIMO
+            // Lo reenviado no lo escribió él: lo marca la aplicación, o es
+            // palabra por palabra algo que había recibido (copiar y pegar).
+            let copiado = texto.chars().count() >= REENVIO_MINIMO
                 && recibidos.get(&texto::marca(texto)).is_some_and(|antes| antes < segundos);
-            if reenviado {
+            if banderas & REENVIADO != 0 || copiado {
                 continue;
             }
             let (Some(propio), Some(fecha)) = (propios::lo_propio(texto, nombre), fecha_de(*segundos)) else {
@@ -231,10 +259,10 @@ async fn juntar_de(
 
 /// Lee lo que el usuario (`nombre`) mandó por WhatsApp desde la última vez y,
 /// con `anotar`, lo guarda en `pool`. Sin `anotar` solo cuenta: sirve para
-/// ver qué entraría antes de encender la fuente.
+/// ver qué entraría antes de encender la fuente. Puede tardar lo que tarde el
+/// usuario en contestarle a macOS si deja leer.
 pub async fn juntar(pool: &SqlitePool, cfg: &WhatsApp, nombre: &str, anotar: bool) -> anyhow::Result<Juntado> {
-    let base = cfg.base.clone();
-    let copia = tokio::task::spawn_blocking(move || Copia::de(&base)).await.context("se cortó la copia")??;
+    let copia = copiar(cfg.base.clone()).await?;
     let whatsapp = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(SqliteConnectOptions::new().filename(copia.archivo()))
@@ -248,6 +276,8 @@ pub async fn juntar(pool: &SqlitePool, cfg: &WhatsApp, nombre: &str, anotar: boo
 
 #[cfg(test)]
 mod pruebas {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     #[test]
@@ -275,6 +305,41 @@ mod pruebas {
         assert_eq!(nombre_del_chat(Some(" Ana Trabajo ")).as_deref(), Some("Ana Trabajo"));
         assert_eq!(nombre_del_chat(Some("+54 9 11 0000-0000")), None);
         assert_eq!(nombre_del_chat(None), None);
+    }
+
+    /// Un caño sin nadie del otro lado: abrirlo queda esperando, como la base
+    /// de WhatsApp mientras macOS aguarda que el usuario conteste su cartel.
+    fn base_que_no_contesta(nombre: &str) -> PathBuf {
+        let carpeta = std::env::temp_dir().join(format!("memoria-prueba-espera-{nombre}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&carpeta);
+        std::fs::create_dir_all(&carpeta).unwrap();
+        let base = carpeta.join("ChatStorage.sqlite");
+        assert!(std::process::Command::new("mkfifo").arg(&base).status().unwrap().success());
+        base
+    }
+
+    #[test]
+    fn una_lectura_frenada_espera_sin_trabar_el_apagado() {
+        let base = base_que_no_contesta("apagado");
+        let hilos = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let (termino, espera) = std::sync::mpsc::channel();
+        hilos.spawn(async move {
+            let _ = termino.send(copiar(base).await.is_ok());
+        });
+        // No termina ni falla: espera.
+        assert!(espera.recv_timeout(Duration::from_millis(300)).is_err());
+        // Mientras espera no dejó ninguna copia a medio hacer.
+        let prefijo = format!("memoria-whatsapp-{}-", std::process::id());
+        let sueltas = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&prefijo))
+            .count();
+        assert_eq!(sueltas, 0);
+        // Y apagar el programa no espera a esa lectura.
+        let inicio = Instant::now();
+        drop(hilos);
+        assert!(inicio.elapsed() < Duration::from_secs(2), "el apagado esperó a la lectura: {:?}", inicio.elapsed());
     }
 
     #[test]
