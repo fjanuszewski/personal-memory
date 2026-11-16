@@ -27,7 +27,7 @@ use crate::error::Resultado;
 use crate::estado::Estado;
 use crate::indice::Clase;
 use crate::notas::tapar_secretos;
-use crate::{senales, texto};
+use crate::{estilo, senales, texto};
 
 /// Tamaño de cada pedazo, en caracteres, y cuánto repite del anterior.
 const VENTANA: usize = 1500;
@@ -126,12 +126,12 @@ pub struct Lectura {
     pub raros: usize,
 }
 
-fn contiene(renglon: &[u8], marca: &[u8]) -> bool {
+pub(crate) fn contiene(renglon: &[u8], marca: &[u8]) -> bool {
     renglon.windows(marca.len()).any(|v| v == marca)
 }
 
 /// Saca de un mensaje del usuario lo que no escribió él. `None` si no queda nada.
-fn limpiar(texto: &str) -> Option<String> {
+pub(crate) fn limpiar(texto: &str) -> Option<String> {
     let mut limpio = texto.to_owned();
     for bloque in BLOQUES_DE_LA_APP.iter() {
         if limpio.contains('<') && bloque.is_match(&limpio) {
@@ -151,7 +151,7 @@ fn limpiar(texto: &str) -> Option<String> {
 
 /// Los textos de un mensaje: el contenido puede ser un texto o una lista de
 /// bloques, de los que solo importan los de texto.
-fn textos(contenido: &Value) -> Option<Vec<&str>> {
+pub(crate) fn textos(contenido: &Value) -> Option<Vec<&str>> {
     match contenido {
         Value::String(t) => Some(vec![t.as_str()]),
         Value::Array(bloques) => Some(
@@ -519,7 +519,7 @@ pub struct Ubicaciones(HashMap<String, PathBuf>);
 
 /// Dónde está el archivo de una conversación: `<raíz>/<carpeta>/<id>.jsonl`.
 /// Los de subagentes están más adentro y no se miran.
-fn ubicar(raiz: &Path, transcripcion: &str, conocidos: &mut Ubicaciones) -> Option<PathBuf> {
+pub(crate) fn ubicar(raiz: &Path, transcripcion: &str, conocidos: &mut Ubicaciones) -> Option<PathBuf> {
     if let Some(conocido) = conocidos.0.get(transcripcion)
         && conocido.is_file()
     {
@@ -588,6 +588,10 @@ pub fn tarea(e: Estado, raiz: PathBuf, apagado: CancellationToken) -> JoinHandle
         loop {
             if let Err(error) = recorrer(&e, &raiz, &mut conocidos, REPOSO).await {
                 tracing::warn!(error = format!("{error:#}"), "falla del lector de conversaciones");
+            }
+            // De paso, lo que escribió el usuario: de ahí se aprende cómo escribe.
+            if let Err(error) = estilo::recorrer(&e, &raiz, &mut conocidos, REPOSO).await {
+                tracing::warn!(error = format!("{error:#}"), "falla al juntar los mensajes del usuario");
             }
             tokio::select! {
                 () = apagado.cancelled() => break,

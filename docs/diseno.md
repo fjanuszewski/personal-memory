@@ -431,22 +431,43 @@ personal-memory/
 - Filtro de secretos antes de guardar notas y fragmentos.
 - Ningún agente borra datos: solo se descartan.
 
-### 4.11 Estilo del usuario: que Claude escriba como él (propuesta, sin acordar)
+### 4.11 Estilo del usuario: que Claude escriba como él
 
-Pedido del usuario del 13/11/2026: que la memoria aprenda cómo escribe y que Claude lo use cuando le pide responder un mensaje o mandar un mail.
+Pedido del usuario del 13/11/2026, confirmado el 16/11/2026: que la memoria aprenda cómo escribe y que Claude lo use cuando le pide responder un mensaje o mandar un mail.
+
+#### Primera parte: hecha en la 0.7 (16/11/2026)
+
+Aprende de las conversaciones con Claude, que el servicio ya leía. Todo queda en la base y no hay ningún modelo de por medio: son cuentas, así que dan siempre lo mismo y se prueban como cualquier otra parte.
+
+- **Qué se guarda** (`migraciones/0003_estilo.sql`): `mensajes_propios` (fuente, lugar, conversación, para quién, idioma, fecha, contenido con los secretos tapados y una marca para no repetir) y `lecturas_propias` (hasta dónde se leyó cada archivo). Una conversación abierta como copia de otra trae los mismos mensajes con la misma fecha: se guardan una vez.
+- **Qué mensajes valen** (`estilo/propios.rs`). Solo los que el archivo marca como escritos por una persona (`origin.kind = human`): quedan afuera los avisos de tareas, los mensajes de otras conversaciones, los de los agregados de la app y el encargo con que una conversación abre a otra, que no trae origen. De esos, tampoco vale:
+  - la respuesta dada con un botón, que trae el texto que le puso Claude y en el archivo no se distingue de una escrita: se reconoce porque es igual a un botón del cierre de turno anterior;
+  - lo que el usuario copió de lo que Claude le había mostrado desde su mensaje anterior (el texto de la respuesta y el resumen del cierre), comparando sin el formato;
+  - lo que le escribió otra persona y él pegó. De cada mensaje quedan los párrafos del principio y se corta en el primero que presenta algo («mirá lo que me dicen:», «¿son estos?»), que parece copiado de una mensajería o de un chat de trabajo, que le habla al usuario por su nombre, que cambia de idioma o que es una tabla o una ficha de datos.
+  - Ante la duda se corta, aunque se pierda algo suyo: guardar como propio lo que escribió otro es peor que perder un renglón. Medido sobre las conversaciones reales de una instalación (unos 1.200 mensajes): en una conversación larga, 12 de los 34 mensajes «del usuario» eran respuestas con botón; de 340 mensajes de varios párrafos, unos 150 quedaron en uno solo después del corte; y las preguntas abiertas con «¿» pasaron de 29 de 812 a 5 de 690, porque las otras eran de textos ajenos.
+- **Por qué se relee desde el último mensaje del usuario.** Para saber si un mensaje es un botón o una cita hay que conocer lo que Claude mostró justo antes. En vez de guardar ese estado, cada archivo se sigue desde el final del último mensaje del usuario que se vio, y solo cuando lleva un rato quieto.
+- **Qué se mide** (`estilo/numeros.rs`), por lugar e idioma: largo, renglones, mayúscula inicial, mensajes enteros en minúsculas, punto final, signos de apertura, puntos suspensivos y signos repetidos, espacios alrededor de los signos, emojis, tildes (sobre una lista de palabras que siempre la llevan, sin las que cambian de sentido), trato (vos o tú), con qué arranca, expresiones que repite, palabras en inglés que mete, saludos y despedidas. En inglés: contracciones y la «i» en minúscula. Las listas de palabras (`estilo/lexico.rs`) son cortas y conservadoras a propósito.
+- **El idioma** de cada mensaje sale de contar palabras muy comunes (`estilo/idioma.rs`): español, inglés y portugués. Lo que es muy corto para saberlo se mide junto con el idioma que más usa el usuario en ese lugar.
+- **Cómo lo usa Claude:** `memoria_estilo(lugar?, idioma?, para?, sobre?, ejemplos?, sesion?)` devuelve lo medido, dicho en renglones con su cuenta al lado, y mensajes suyos de ejemplo. El mod suma la regla: antes de redactar algo que va a salir con el nombre del usuario, pedir el estilo; con él, seguir hablando como siempre.
+- **Los ejemplos pueden aparecer en otra conversación**, así que se eligen con más cuidado que lo que se mide: una frase corrida y corta, sin direcciones, sin nada tapado y sin nada que parezca un dato (una cuenta, un teléfono, una clave escrita al pasar). Los del grupo de la conversación que pregunta van siempre primero; los de otro grupo solo completan si faltan y dicen de cuál son.
+- **Si no alcanza:** de un lugar del que no hay mensajes usa lo que tiene y avisa que las tildes y los saludos pueden ser otros ahí; con menos de cinco mensajes en un idioma no arma perfil; con menos de treinta avisa que es una pista.
+
+#### Lo que falta (propuesta, sin acordar)
+
+Los chats con Claude muestran cómo escribe el usuario cuando escribe rápido. Para un mensaje o un correo hacen falta las fuentes donde escribe esos mensajes.
 
 - **Se elige al instalar:** el instalador pregunta qué fuentes conectar, una por una, y solo lee las que se aceptan. Queda anotado en la configuración y se cambia corriendo el instalador de nuevo.
 - **Qué se junta, cada día:** solo los mensajes que escribió el usuario, nunca los de los demás.
-  - Chats con Claude: ya los lee el lector.
+  - Chats con Claude: hecho.
   - WhatsApp: de la base local de WhatsApp Desktop (`ChatStorage.sqlite`), sobre una copia y en solo lectura, como hace la herramienta `whatsapp-leer`.
   - Slack: los espacios que ya tienen conector en esta Mac.
   - Mails enviados (sugerencia): es la mejor fuente para aprender cómo escribe los mails.
 - **Qué se guarda:**
   - Los mensajes propios, con de dónde salieron (lugar, conversación, a quién, idioma, fecha) y su huella. Pasan por el filtro de secretos.
   - Un perfil por lugar e idioma, con dos partes: los números que calcula el programa (largo, signos, mayúsculas, acentos, emojis, saludos y despedidas, muletillas, mezcla de idiomas) y una descripción corta que escribe el modelo local de noche.
-- **Cómo lo usa Claude:** una herramienta `memoria_estilo(lugar, idioma?, para?, sobre?)` que devuelve el perfil y los mensajes del usuario más parecidos a la situación (a esa persona, sobre ese tema). El mod suma la regla: antes de escribir algo que va a salir con el nombre del usuario, pedir el estilo.
-- **Privacidad:** todo queda en la Mac y el análisis lo hace el modelo local.
-- **Preguntas abiertas:** si dentro de una fuente se dejan afuera algunas conversaciones (por ejemplo, chats de familia); cómo se lee Slack sin duplicar las claves que hoy tienen los conectores locales.
+- **Privacidad:** todo queda en la Mac.
+- **La descripción en palabras** (más allá de los números) la podría escribir un agente lanzado por el mod dentro de una conversación, como el de las mejoras (4.8), sin llave. Ese agente no necesitaría ninguna herramienta: recibe una muestra y devuelve un texto.
+- **Preguntas abiertas:** si dentro de una fuente se dejan afuera algunas conversaciones (por ejemplo, chats de familia); cómo se lee Slack sin duplicar las claves que hoy tienen los conectores locales; si el servicio, que corre de fondo, puede leer la base de otra aplicación sin que el sistema lo frene; y cómo se guarda a quién le escribía sin juntar datos de terceros.
 
 ### 4.12 Versión 0.4: un archivo y un modelo adentro (13/11/2026)
 
@@ -505,9 +526,9 @@ Se midieron cuatro opciones con las mismas notas y preguntas (las de la batería
 | 3. Mejoras | Señales; `reportar` y `mejorar`; guardián; batería inicial; agente; aviso y reintento en el chat | Una falla provocada se reporta, se acepta, se instala y el chat retoma solo; y una mejora que rompe la batería se rechaza y todo queda como estaba |
 | 4. Lo viejo | Extracción nocturna con el modelo local; recorrido del historial grupo por grupo | El historial de ACME queda procesado y las notas resultantes pasan la batería |
 | 5. Después | La regla de grupos pasa al servicio (hecho en la 0.5); gancho de inicio para la terminal; preparar el paso a un servidor | Según se necesite |
-| 6. Estilo (propuesta) | Mensajes propios de los chats, WhatsApp y Slack; perfil por lugar e idioma; `memoria_estilo` | Claude redacta un mensaje de WhatsApp y un mail que suenan al usuario usando el perfil |
+| 6. Estilo | Mensajes propios de los chats con Claude; perfil por lugar e idioma; `memoria_estilo` (hecho en la 0.7). Falta: WhatsApp, Slack y correo, cada uno optativo | Claude redacta un mensaje de WhatsApp y un mail que suenan al usuario usando el perfil |
 
-Hechas: la 1 (12/11/2026) y la 2 (13/11/2026). La 3 está construida, instalada y ensayada con un agente de mentira (13/11/2026); desde el 14/11/2026 el agente corre dentro de la conversación de Claude, sin llave (4.8). El 13/11/2026, además, la versión 0.4 sacó a Postgres y a Ollama de lo que hace falta para instalarla, y el 14/11/2026 la 0.5 sacó los nombres propios y dejó una regla de grupos general (4.12).
+Hechas: la 1 (12/11/2026) y la 2 (13/11/2026). La 3 está construida, instalada y ensayada con un agente de mentira (13/11/2026); desde el 14/11/2026 el agente corre dentro de la conversación de Claude, sin llave (4.8), y el 16/11/2026 se instalaron solas las dos primeras mejoras reales. De la 6, la primera parte (aprender de los chats con Claude) está en la 0.7 (16/11/2026). El 13/11/2026, además, la versión 0.4 sacó a Postgres y a Ollama de lo que hace falta para instalarla, y el 14/11/2026 la 0.5 sacó los nombres propios y dejó una regla de grupos general (4.12).
 
 ## 6. Riesgos y preguntas abiertas
 

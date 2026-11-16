@@ -348,6 +348,9 @@ test('registra la conversación con el grupo del costado y suma la sección', as
   expect(memoria?.text).toContain('Esta conversación es del grupo «ACME › Portal» y su id es `local_1`')
   expect(memoria?.text).toContain('select:mcp__memoria__memoria_buscar,mcp__memoria__memoria_guardar')
   expect(memoria?.text).toContain('Nunca guardes claves, contraseñas, tokens ni datos personales de terceros.')
+  // Y la regla del estilo: pedirlo antes de redactar algo en nombre del usuario.
+  expect(memoria?.text).toContain('pedí cómo escribe con `memoria_estilo`')
+  expect(memoria?.text).toContain(',mcp__memoria__memoria_estilo».')
   expect(memoria?.text).toContain(RESUMEN)
 
   // La sección no cambia de un pedido a otro y el servicio se consulta una vez.

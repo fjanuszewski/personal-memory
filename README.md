@@ -2,7 +2,7 @@
 
 Memoria a largo plazo por grupo (empresa › proyecto, como ACME › Portal) para las conversaciones con Claude. Corre de fondo en tu Mac, guarda decisiones, errores resueltos, cambios, acuerdos con el cliente y pendientes en un archivo propio, y Claude la consulta y la completa sola en cada conversación. El diseño completo está en [docs/diseno.md](docs/diseno.md).
 
-**Estado:** etapa 3 (mejoras), versión 0.6. Busca por palabras y por significado, une las notas repetidas, lleva la cuenta de qué nota reemplazó a cuál, lee lo conversado y, cuando falla, se puede arreglar sola si el usuario acepta. El recorrido del historial viejo (etapa 4) todavía no está.
+**Estado:** versión 0.7. Busca por palabras y por significado, une las notas repetidas, lleva la cuenta de qué nota reemplazó a cuál, lee lo conversado, cuando falla se puede arreglar sola si el usuario acepta, y aprende cómo escribe quien la usa para que Claude redacte en su nombre con su estilo. El recorrido del historial viejo (etapa 4) todavía no está.
 
 **No necesita nada instalado aparte.** Desde la versión 0.4 la base es un solo archivo (`~/.memoria/memoria.db`, SQLite) y el modelo que calcula las huellas de significado corre dentro del servicio. Ya no hacen falta Postgres ni Ollama (Ollama queda como opción para quien lo prefiera).
 
@@ -10,7 +10,7 @@ Memoria a largo plazo por grupo (empresa › proyecto, como ACME › Portal) par
 
 | Carpeta | Qué es |
 |---|---|
-| `crates/servicio/` | El servicio en Rust: MCP por HTTP en `127.0.0.1:7337` (con clave local), `GET /salud`, la base (un archivo de SQLite), respaldo diario, huellas de significado (con un modelo propio, o con Ollama) y lector de conversaciones. |
+| `crates/servicio/` | El servicio en Rust: MCP por HTTP en `127.0.0.1:7337` (con clave local), `GET /salud`, la base (un archivo de SQLite), respaldo diario, huellas de significado (con un modelo propio, o con Ollama), lector de conversaciones y lo que aprende de cómo escribe el usuario. |
 | `crates/guardian/` | El guardián: otro programa, que toma las mejoras aceptadas, hace trabajar al agente en una copia, prueba lo que hizo, lo instala y vuelve atrás si algo falla. El agente no lo puede tocar. |
 | `bateria/` | Las preguntas iniciales con que el guardián mide cada cambio. El agente tampoco las puede tocar. |
 | `migraciones/` | Cambios de la base, numerados. El servicio los aplica al arrancar, con un respaldo antes. |
@@ -47,6 +47,7 @@ Si al reinstalar lo instalado tiene mejoras que el repositorio no trae, el insta
 - `memoria_reportar(resumen, detalle, sesion?, buscado?, esperado?, obtenido?, notas_esperadas?, toca_base?, borra_datos?, suma_librerias?)`: registra una falla de la memoria y responde si hay que preguntarle al usuario, o si eso ya está en curso o ya lo rechazó.
 - `memoria_mejorar(id)` y `memoria_rechazar(id)`: lo que el usuario contestó.
 - `memoria_mejora_estado(id)`: en qué está una mejora.
+- `memoria_estilo(lugar?, idioma?, para?, sobre?, ejemplos?, sesion?)`: cómo escribe el usuario (lo medido en sus propios mensajes) y algunos mensajes suyos de ejemplo, para redactar algo que va a salir con su nombre.
 
 Con `sesion` en vez de `id`, `memoria_mejora_estado` es además el canal del mod: le cuenta qué pasa con las mejoras de esa conversación y recibe los pasos del agente que el mod lanzó.
 
@@ -77,6 +78,24 @@ Hasta dos mejoras se trabajan a la vez. Si una se instala mientras otra estaba e
 El agente trabaja mientras la conversación donde se aceptó la mejora esté abierta. Si se cierra antes de que termine, la mejora queda esperando: el guardián arma la copia de nuevo y el agente arranca otra vez cuando se vuelve a escribir en esa conversación (o, si pasan unas horas, en otra del mismo grupo). Un agente que no termina se lanza hasta tres veces; después la mejora queda sin instalar, con el motivo a la vista en el chat. Usa el plan de Claude del usuario, como cualquier otra tarea de fondo de la conversación.
 
 Cada mejora parte del commit de git del que salió lo instalado (`~/.memoria/instalada`). Si se instaló con cambios sin guardar en git, las mejoras quedan en pausa hasta guardarlos y correr el instalador de nuevo. Lo que hace cada mejora queda en su rama (`mejora-N-…`) dentro de `~/.memoria/codigo`, y la rama `instalada` de esa copia se adelanta a la versión nueva. El repositorio donde se desarrolla no se toca.
+
+## Aprende cómo escribís
+
+Para que un mensaje o un correo redactado por Claude suene a vos y no a Claude. La memoria junta **solo lo que escribiste vos**, mide cómo lo escribís y se lo cuenta a Claude cuando tiene que redactar algo en tu nombre. No hay ningún modelo de por medio y nada sale de tu máquina: son cuentas sobre tus propios mensajes, guardados en la misma base.
+
+**De dónde aprende.** Por ahora, de tus conversaciones con Claude (las que el servicio ya lee). El servicio las repasa solo, de fondo, y la primera vez recorre también lo anterior. Otras fuentes (mensajería, correo) van a ser siempre optativas: cada una se enciende aparte.
+
+**Qué deja afuera.** En una conversación con Claude no todo lo que figura como tuyo lo escribiste vos, así que se queda nada más con lo que es claramente tuyo y, ante la duda, corta:
+
+- La respuesta que diste tocando un botón: el texto lo había escrito Claude.
+- Lo que copiaste de la respuesta anterior para preguntar por eso.
+- Lo que te escribió otra persona y pegaste («mirá lo que me dicen:»), los mensajes copiados de una mensajería o de un chat de trabajo, lo que viene después de un cambio de idioma, las tablas y las fichas de datos.
+- Los avisos de la app, lo que mandan otras conversaciones y los bloques de código o de registros.
+- Las claves y los tokens, que se tapan igual que en el resto de la memoria.
+
+**Qué mide.** Por lugar (dónde escribís) e idioma: el largo de los mensajes, si empezás con mayúscula, si ponés punto final, si abrís las preguntas con «¿», cuántas tildes ponés (y qué palabras escribís sin tilde), si tratás de vos o de tú, los espacios alrededor de los signos, los emojis, con qué palabras arrancás, qué expresiones repetís y qué palabras en inglés metés. Cada dato va con su cuenta al lado («casi nunca (5 de 690)»), y con pocos mensajes dice que es apenas una pista.
+
+**Cómo lo usa Claude.** Antes de redactar algo que va a salir con tu nombre llama a `memoria_estilo` diciendo dónde va a salir. Recibe lo medido y algunos mensajes tuyos de ejemplo: frases cortas y limpias, sin direcciones ni nada que parezca un dato, primero las del grupo de esa conversación (las de otro grupo solo completan si faltan, y dicen de cuál son). Si le pide el estilo de un lugar del que todavía no hay mensajes, usa lo que tiene y lo avisa. A vos te sigue hablando como siempre.
 
 ## Cómo busca y cómo cuida la calidad
 

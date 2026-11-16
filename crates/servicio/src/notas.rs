@@ -22,7 +22,7 @@ const LARGO_TITULO: usize = 200;
 const LARGO_CUERPO: usize = 4000;
 /// Con cuántas notas cercanas se compara la nueva.
 const CANDIDATAS: usize = 3;
-const TAPADO: &str = "[secreto quitado]";
+pub(crate) const TAPADO: &str = "[secreto quitado]";
 
 #[derive(Clone, Debug)]
 pub struct NuevaNota {

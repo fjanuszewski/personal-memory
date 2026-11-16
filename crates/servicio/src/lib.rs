@@ -8,6 +8,7 @@ pub mod config;
 pub mod contexto;
 pub mod error;
 pub mod estado;
+pub mod estilo;
 pub mod grupos;
 pub mod huellas;
 pub mod indice;

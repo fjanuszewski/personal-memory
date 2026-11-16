@@ -118,6 +118,7 @@ async fn claude_registra_guarda_y_encuentra_por_mcp() {
         [
             "memoria_buscar",
             "memoria_contexto",
+            "memoria_estilo",
             "memoria_guardar",
             "memoria_mejora_estado",
             "memoria_mejorar",
