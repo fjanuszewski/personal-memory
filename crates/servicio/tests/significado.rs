@@ -437,6 +437,13 @@ async fn con_el_modelo_interno_el_login_encuentra_la_sesion_de_cognito() {
 /// reconocer la misma nota escrita distinto.
 async fn con_un_modelo_de_verdad(e: Estado) {
     let pool = e.pool.clone();
+    // Primero se le da tiempo al modelo para cargarse: después, cada huella
+    // tiene que llegar dentro de lo que espera una búsqueda de verdad. Sin
+    // esto, en una máquina ocupada la primera búsqueda se queda sin huella y
+    // la prueba falla por lenta, no por lo que mide.
+    e.huella_de("para que el modelo ya esté cargado", Uso::Texto, std::time::Duration::from_mins(3))
+        .await
+        .expect("el modelo de huellas tiene que responder");
     empezar(&e, "local_a", "ACME", Some("Portal")).await;
     empezar(&e, "local_b", "ACME", Some("Portal")).await;
     let notas = [

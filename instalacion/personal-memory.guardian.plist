@@ -31,8 +31,14 @@
   <true/>
   <key>ThrottleInterval</key>
   <integer>30</integer>
+  <!-- Con prioridad normal, igual que el servicio. El guardián corre las
+       pruebas y prende copias del servicio para medir, y todo eso usa el
+       modelo de huellas: con prioridad de fondo macOS lo manda a los núcleos
+       lentos, las huellas no llegan a tiempo y las pruebas fallan aunque el
+       cambio esté bien. Así se descartaron, sin razón, las dos primeras
+       mejoras de verdad. -->
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
 
   <key>StandardOutPath</key>
   <string>__CASA__/Library/Logs/memoria/guardian-launchd.log</string>

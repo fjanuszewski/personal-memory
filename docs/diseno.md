@@ -385,6 +385,11 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
 - **El cambio queda guardado aunque no pase.** El guardián lo guarda en la rama de la mejora (`mejora-N-I`, en `~/.memoria/codigo`) antes de compilar y probar, y anota la rama: así se puede ver qué había hecho el agente. Antes se perdía.
 - **Queda pendiente:** que una mejora cuyo cambio no pasa las pruebas vuelva al agente con lo que falló, en vez de terminar ahí.
 
+**Los dos descartes eran falsos: el guardián corría con prioridad baja (16/11/2026).** La mejora se lanzó una tercera vez; el agente, ya con su esfuerzo propio, terminó en 10 minutos y medio con otro cambio, y el guardián lo descartó por la misma prueba que antes: la que usa el modelo de verdad. Dos cambios distintos fallando en la misma prueba, y solo en la corrida del guardián, no era casualidad: esa prueba falla sobre el código sin ningún cambio si se la corre con prioridad de fondo (`taskpolicy -b`), que es como launchd arrancaba al guardián. Con esa prioridad macOS manda el modelo a los núcleos lentos, la primera huella no llega dentro de lo que espera una búsqueda y la búsqueda sigue solo por palabras. Quedó así:
+- **El guardián arranca con prioridad normal**, como el servicio: corre pruebas y prende copias del servicio para medir, y todo eso usa el modelo.
+- **La prueba con el modelo de verdad le da tiempo a cargarse** antes de medir: ya no falla por lenta.
+- **El cambio guardado se volvió a probar sin lanzar otro agente:** como el guardián ahora guarda el cambio en su rama antes de probarlo, alcanzó con armar de nuevo la copia desde esa rama y dejar la mejora como «el agente terminó».
+
 **Concurrencia:**
 - Hasta 2 agentes a la vez. La instalación se hace en fila.
 - Si una mejora quedó vieja porque otra instaló antes y no se puede combinar, el agente la rehace sobre la versión nueva, con un reintento como máximo.
