@@ -28,6 +28,7 @@ use crate::mejoras::{self, EstadoMejora, Fase, Mejora, Paso, PorLanzar, Registra
 use crate::modelo::TipoNota;
 use crate::notas::{self, Guardado, NuevaNota};
 use crate::senales;
+use crate::texto;
 
 const INSTRUCCIONES: &str = "Memoria a largo plazo del usuario, por grupo (empresa › proyecto, como «ACME › Portal»). \
 Buscá con memoria_buscar antes de responder sobre algo que pudo decidirse antes en el grupo (encuentra también lo \
@@ -276,8 +277,12 @@ pub async fn buscar(e: &Estado, p: &PedidoBuscar) -> Resultado<String> {
         limite: p.limite.and_then(|l| usize::try_from(l).ok()).unwrap_or(buscar::LIMITE_POR_DEFECTO),
     };
     let inicio = Instant::now();
-    let huella = e.huella_de(consulta, Uso::Consulta, LIMITE_CONSULTA).await;
-    let hallado = buscar::buscar(e, grupo.as_ref(), &armada, huella.as_deref()).await?;
+    // Si la consulta tiene palabras con equivalentes («correos»: mails,
+    // emails), se busca también por el significado de esa otra forma de decirla.
+    let mut dichas = vec![consulta.to_owned()];
+    dichas.extend(texto::con_equivalentes(consulta));
+    let huellas = e.huellas_de(&dichas, Uso::Consulta, LIMITE_CONSULTA).await.unwrap_or_default();
+    let hallado = buscar::buscar(e, grupo.as_ref(), &armada, &huellas).await?;
     let tardo = inicio.elapsed();
 
     // Cada búsqueda deja una señal: qué se buscó y qué apareció.
@@ -295,7 +300,7 @@ pub async fn buscar(e: &Estado, p: &PedidoBuscar) -> Resultado<String> {
         "grupo": grupo.as_ref().map(Grupo::nombre),
         "tipo": p.tipo.map(TipoNota::clave),
         "recorrido": hallado.recorrido,
-        "por_significado": huella.is_some(),
+        "por_significado": !huellas.is_empty(),
         "resultados": resultados,
         "ms": u64::try_from(tardo.as_millis()).unwrap_or(u64::MAX),
     });

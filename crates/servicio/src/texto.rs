@@ -28,6 +28,27 @@ const VACIAS: &[&str] = &[
     "y", "ya", "yo",
 ];
 
+/// Palabras que acá se usan para lo mismo aunque no se parezcan: quien
+/// pregunta por «los correos» quiere también lo que se guardó como «mail» o
+/// «emails». Cada renglón trae las formas en singular y en plural (sin
+/// acentos), en el mismo orden. Vale solo para lo que se busca: lo guardado
+/// no cambia, así que no hay que armar de nuevo el índice de palabras.
+const IGUALES: &[(&[&str], &[&str])] = &[(&["correo", "mail", "email"], &["correos", "mails", "emails"])];
+
+/// El renglón de [`IGUALES`] donde está una palabra (en minúsculas y sin
+/// acentos), y si está en plural.
+fn iguales(plana: &str) -> Option<(usize, bool)> {
+    IGUALES.iter().enumerate().find_map(|(renglon, (una, varias))| {
+        if una.contains(&plana) {
+            Some((renglon, false))
+        } else if varias.contains(&plana) {
+            Some((renglon, true))
+        } else {
+            None
+        }
+    })
+}
+
 fn sin_acento(c: char) -> char {
     match c {
         'á' | 'à' | 'ä' | 'â' => 'a',
@@ -127,8 +148,43 @@ pub fn conjunto(indexado: &str) -> HashSet<&str> {
     indexado.split_whitespace().collect()
 }
 
+/// La consulta con sus palabras equivalentes a la vista, para buscar también
+/// por el significado de esa otra forma de decirla: «los correos» pasa a
+/// «los correos (mails, emails)». Un modelo de huellas puede leer «correos»
+/// como cartas y dejar lejos la nota que habla de mails. `None` si la
+/// consulta no tiene ninguna palabra con equivalentes.
+#[must_use]
+pub fn con_equivalentes(texto: &str) -> Option<String> {
+    let mut salida = String::with_capacity(texto.len() + 32);
+    let mut copiado = 0;
+    // Cada renglón se aclara una sola vez, en la primera palabra que lo nombra.
+    let mut aclarados: Vec<usize> = Vec::new();
+    for (desde, hasta, _) in recorrer(texto) {
+        let plana = llano(&texto[desde..hasta]);
+        let Some((renglon, plural)) = iguales(&plana) else { continue };
+        if aclarados.contains(&renglon) {
+            continue;
+        }
+        aclarados.push(renglon);
+        let (una, varias) = IGUALES[renglon];
+        let formas = if plural { varias } else { una };
+        let otras: Vec<&str> = formas.iter().copied().filter(|forma| *forma != plana).collect();
+        salida.push_str(&texto[copiado..hasta]);
+        salida.push_str(" (");
+        salida.push_str(&otras.join(", "));
+        salida.push(')');
+        copiado = hasta;
+    }
+    if aclarados.is_empty() {
+        return None;
+    }
+    salida.push_str(&texto[copiado..]);
+    Some(salida)
+}
+
 /// Lo que se busca: las palabras de la consulta que dicen algo, cada una con
-/// sus raíces. Una palabra repetida cuenta una vez.
+/// sus raíces. Una palabra repetida cuenta una vez, y una que tiene
+/// equivalentes («correos», «mails») trae también las raíces de ellos.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Consulta {
     palabras: Vec<Vec<String>>,
@@ -138,8 +194,22 @@ impl Consulta {
     #[must_use]
     pub fn de(texto: &str) -> Self {
         let mut palabras: Vec<Vec<String>> = Vec::new();
-        for (_, _, raices) in recorrer(texto) {
-            if !raices.is_empty() && !palabras.contains(&raices) {
+        for (desde, hasta, mut raices) in recorrer(texto) {
+            if raices.is_empty() {
+                continue;
+            }
+            if let Some((renglon, _)) = iguales(&llano(&texto[desde..hasta])) {
+                // Las raíces de todo el renglón, siempre en el mismo orden:
+                // así «correos» y «mails» cuentan como la misma palabra.
+                let (una, varias) = IGUALES[renglon];
+                raices.clear();
+                for raiz in una.iter().chain(varias).flat_map(|forma| raices_de(forma)) {
+                    if !raices.contains(&raiz) {
+                        raices.push(raiz);
+                    }
+                }
+            }
+            if !palabras.contains(&raices) {
                 palabras.push(raices);
             }
         }
@@ -302,6 +372,50 @@ mod pruebas {
             Some("(\"region\") AND ((\"deploy\") OR (\"region\") OR (\"produccion\"))")
         );
         assert_eq!(larga.para_buscar_con(&[]), larga.para_buscar(false));
+    }
+
+    #[test]
+    fn correos_mails_y_emails_son_la_misma_palabra() {
+        // Al guardar, cada una queda con su raíz: no se parecen entre sí.
+        assert_eq!(para_indexar("correos mail mails email emails e-mail"), "corre mail mails email emails mail");
+        // Al buscar, cualquiera de ellas trae las raíces de todas.
+        let c = Consulta::de("con qué servicio mandamos los correos");
+        assert_eq!(c.total(), 3);
+        assert_eq!(
+            c.para_buscar(false).as_deref(),
+            Some("(\"servici\") OR (\"mand\") OR (\"corre\" OR \"mail\" OR \"email\" OR \"mails\" OR \"emails\")")
+        );
+        for nota in ["El Inbox manda mail con SendGrid", "Los mails salen por Mailgun", "Proveedor de email: SES"] {
+            let indexada = para_indexar(nota);
+            assert!(Consulta::de("correos").firme(&conjunto(&indexada)), "{nota}");
+            assert!(Consulta::de("Correo").firme(&conjunto(&indexada)), "{nota}");
+        }
+        let en_castellano = para_indexar("El correo pasa a SES");
+        assert!(Consulta::de("mails").firme(&conjunto(&en_castellano)));
+        assert!(Consulta::de("e-mail").firme(&conjunto(&en_castellano)));
+        // Dichas de dos formas en la misma consulta cuentan una vez, y la
+        // búsqueda se reconoce como la misma.
+        assert_eq!(Consulta::de("correos y mails del Inbox").total(), 2);
+        assert_eq!(Consulta::de("mails del inbox").firma(), Consulta::de("correos del inbox").firma());
+        // Lo que no tiene equivalentes queda como estaba: «corre» no es «correo».
+        assert_eq!(Consulta::de("dónde corre").para_buscar(false).as_deref(), Some("(\"corr\")"));
+        assert!(!Consulta::de("dónde corre").firme(&conjunto(&en_castellano)));
+    }
+
+    #[test]
+    fn deja_los_equivalentes_a_la_vista() {
+        assert_eq!(
+            con_equivalentes("con qué servicio mandamos los correos").as_deref(),
+            Some("con qué servicio mandamos los correos (mails, emails)")
+        );
+        assert_eq!(con_equivalentes("¿Cómo sale el Mail?").as_deref(), Some("¿Cómo sale el Mail (correo, email)?"));
+        // Cada grupo de equivalentes se aclara una sola vez.
+        assert_eq!(
+            con_equivalentes("correos o emails del cliente").as_deref(),
+            Some("correos (mails, emails) o emails del cliente")
+        );
+        assert_eq!(con_equivalentes("el problema del login"), None);
+        assert_eq!(con_equivalentes(""), None);
     }
 
     #[test]

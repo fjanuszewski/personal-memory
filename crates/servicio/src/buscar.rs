@@ -209,14 +209,36 @@ async fn notas_por_palabras(
         .collect())
 }
 
+/// Las huellas más parecidas a la consulta, de la más parecida a la menos.
+/// La consulta puede traer más de una huella (la de lo que se escribió y la
+/// de la misma pregunta con sus palabras equivalentes): de cada texto cuenta
+/// el mejor parecido.
+fn cercanas(indice: &Indice, clase: Huellas, huellas: &[Vec<f32>], entra: &dyn Fn(&Dato) -> bool) -> Vec<(Dato, f64)> {
+    let mut mejores: Vec<(Dato, f64)> = Vec::new();
+    for huella in huellas {
+        for (dato, parecido) in indice.cercanas(clase, huella, usize::from(CANDIDATOS), entra) {
+            match mejores.iter_mut().find(|(d, _)| d.id == dato.id) {
+                Some((_, mejor)) => *mejor = mejor.max(parecido),
+                None => mejores.push((dato, parecido)),
+            }
+        }
+    }
+    mejores.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.0.id.cmp(&a.0.id)));
+    mejores.truncate(usize::from(CANDIDATOS));
+    mejores
+}
+
 async fn notas_por_significado(
     conn: &mut SqliteConnection,
     indice: &Indice,
     ids: Option<&[i64]>,
     c: &Consulta,
-    huella: &[f32],
+    huellas: &[Vec<f32>],
     piso: f64,
 ) -> Resultado<Vec<Fila>> {
+    if huellas.is_empty() {
+        return Ok(Vec::new());
+    }
     // Primero, cuáles pueden salir (por grupo, tipo y fecha); después, de
     // esas, las más parecidas según las huellas en memoria.
     let filas: Vec<(i64, String, Option<i64>, DateTime<Utc>)> = sqlx::query_as(
@@ -238,8 +260,7 @@ async fn notas_por_significado(
             (id, Fila { id, estado: estado(&estado_de_nota), reemplazada_por, fecha: creada, firme: true })
         })
         .collect();
-    Ok(indice
-        .cercanas(Huellas::Notas, huella, usize::from(CANDIDATOS), &|d| posibles.contains_key(&d.id))
+    Ok(cercanas(indice, Huellas::Notas, huellas, &|d| posibles.contains_key(&d.id))
         .into_iter()
         .filter(|(_, parecido)| *parecido >= piso)
         .filter_map(|(dato, _)| posibles.get(&dato.id).cloned())
@@ -311,15 +332,14 @@ fn fragmentos_por_significado(
     indice: &Indice,
     ids: Option<&[i64]>,
     c: &Consulta,
-    huella: &[f32],
+    huellas: &[Vec<f32>],
     piso: f64,
 ) -> Vec<Fila> {
     let desde = c.desde.map(|d| d.timestamp());
     let entra = |d: &Dato| {
         ids.is_none_or(|ids| d.grupo.is_some_and(|g| ids.contains(&g))) && desde.is_none_or(|desde| d.fecha >= desde)
     };
-    indice
-        .cercanas(Huellas::Fragmentos, huella, usize::from(CANDIDATOS), &entra)
+    cercanas(indice, Huellas::Fragmentos, huellas, &entra)
         .into_iter()
         .filter(|(_, parecido)| *parecido >= piso)
         .map(|(dato, _)| Fila {
@@ -619,9 +639,11 @@ async fn detallar(
     Ok(hallazgos)
 }
 
-/// Busca `c` empezando por `grupo`. `huella` es la de la consulta; sin ella
-/// (las huellas no andaban) la búsqueda es solo por palabras.
-pub async fn buscar(e: &Estado, grupo: Option<&Grupo>, c: &Consulta, huella: Option<&[f32]>) -> Resultado<Busqueda> {
+/// Busca `c` empezando por `grupo`. `huellas` son las de la consulta: la de
+/// lo que se escribió y, si tiene palabras con equivalentes, la de esa otra
+/// forma de decirlo. Sin ninguna (las huellas no andaban) la búsqueda es solo
+/// por palabras.
+pub async fn buscar(e: &Estado, grupo: Option<&Grupo>, c: &Consulta, huellas: &[Vec<f32>]) -> Resultado<Busqueda> {
     let palabras = Palabras::de(&c.texto);
     // Una sola lectura: todas las consultas ven la base del mismo momento.
     let mut tx = e.pool.begin().await?;
@@ -645,17 +667,11 @@ pub async fn buscar(e: &Estado, grupo: Option<&Grupo>, c: &Consulta, huella: Opt
         recorrido.push(nombre.clone());
         let ids = ids.as_deref();
         let por_palabras = notas_por_palabras(&mut tx, ids, c, &palabras).await?;
-        let por_significado = match huella {
-            Some(h) => notas_por_significado(&mut tx, &e.indice, ids, c, h, e.umbrales.piso_notas).await?,
-            None => Vec::new(),
-        };
+        let por_significado = notas_por_significado(&mut tx, &e.indice, ids, c, huellas, e.umbrales.piso_notas).await?;
         sumar(&mut candidatos, &mut vistos, Capa::Nota, etapa, por_palabras, por_significado, ahora);
         if con_fragmentos {
             let por_palabras = fragmentos_por_palabras(&mut tx, ids, c, &palabras, pedido.as_deref()).await?;
-            let por_significado = match huella {
-                Some(h) => fragmentos_por_significado(&e.indice, ids, c, h, e.umbrales.piso_fragmentos),
-                None => Vec::new(),
-            };
+            let por_significado = fragmentos_por_significado(&e.indice, ids, c, huellas, e.umbrales.piso_fragmentos);
             sumar(&mut candidatos, &mut vistos, Capa::Fragmento, etapa, por_palabras, por_significado, ahora);
         }
         if candidatos.iter().filter(|c| c.fila.firme).count() >= MINIMO {
@@ -740,6 +756,28 @@ mod pruebas {
         assert!((puntos[&2] - puntos[&4]).abs() < 1e-12);
         assert!((puntos[&1] - 1.0 / 61.0).abs() < 1e-12);
         assert!((puntos[&3] - (1.0 / 63.0 + 1.0 / 61.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn de_varias_huellas_cuenta_el_mejor_parecido() {
+        let indice = Indice::default();
+        for (id, huella) in [(1, [1.0, 0.0, 0.0]), (2, [0.0, 1.0, 0.0]), (3, [0.0, 0.0, 1.0])] {
+            assert!(indice.poner(Huellas::Notas, Dato { id, grupo: None, fecha: 0 }, &huella));
+        }
+        // La consulta como se escribió queda cerca de la nota 1; dicha con
+        // sus equivalentes, todavía más cerca de la 2.
+        let huellas = vec![vec![1.0, 0.5, 0.0], vec![0.1, 1.0, 0.0]];
+        let halladas = cercanas(&indice, Huellas::Notas, &huellas, &|_| true);
+        assert_eq!(halladas.iter().map(|(d, _)| d.id).collect::<Vec<_>>(), vec![2, 1, 3]);
+        assert!((halladas[0].1 - 1.0 / 1.01_f64.sqrt()).abs() < 1e-6, "{halladas:?}");
+        assert!((halladas[1].1 - 1.0 / 1.25_f64.sqrt()).abs() < 1e-6, "{halladas:?}");
+        assert!(halladas[2].1.abs() < 1e-6, "{halladas:?}");
+        // Con una sola huella es lo mismo que preguntarle al índice.
+        assert_eq!(
+            cercanas(&indice, Huellas::Notas, &huellas[..1], &|_| true),
+            indice.cercanas(Huellas::Notas, &huellas[0], usize::from(CANDIDATOS), &|_| true)
+        );
+        assert_eq!(cercanas(&indice, Huellas::Notas, &[], &|_| true), Vec::new());
     }
 
     #[test]

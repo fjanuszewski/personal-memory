@@ -5,7 +5,7 @@
 mod comun;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::routing::post;
 use axum::{Json, Router};
@@ -414,22 +414,129 @@ async fn con_bge_m3_en_ollama_el_login_encuentra_la_sesion_de_cognito() {
     con_un_modelo_de_verdad(Estado::nuevo(base.pool.clone(), Arc::new(ollama))).await;
 }
 
-/// Lo mismo con el modelo que corre dentro del programa. Solo si ya está
-/// bajado en esta máquina (`MEMORIA_MODELOS` o `~/.memoria/modelos`): las
-/// pruebas nunca bajan nada.
+/// El modelo que corre dentro del programa, si ya está bajado en esta máquina
+/// (`MEMORIA_MODELOS` o `~/.memoria/modelos`): las pruebas nunca bajan nada.
+/// Es uno solo para todas las pruebas que lo usan: se carga una vez.
+fn modelo_interno() -> Option<Arc<Interno>> {
+    static MODELO: OnceLock<Option<Arc<Interno>>> = OnceLock::new();
+    MODELO
+        .get_or_init(|| {
+            let carpeta = std::env::var_os("MEMORIA_MODELOS")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|casa| PathBuf::from(casa).join(".memoria/modelos")))?;
+            let interno = Interno::nuevo("gemma", &carpeta, 4).unwrap();
+            if !interno.bajado() {
+                eprintln!("el modelo interno no está bajado en {}: salteo las pruebas que lo usan", carpeta.display());
+                return None;
+            }
+            Some(Arc::new(interno))
+        })
+        .clone()
+}
+
+/// Lo mismo con el modelo que corre dentro del programa, si está bajado.
 #[tokio::test]
 async fn con_el_modelo_interno_el_login_encuentra_la_sesion_de_cognito() {
-    let carpeta = std::env::var_os("MEMORIA_MODELOS")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|casa| PathBuf::from(casa).join(".memoria/modelos")));
-    let Some(carpeta) = carpeta else { return };
-    let interno = Interno::nuevo("gemma", &carpeta, 4).unwrap();
-    if !interno.bajado() {
-        eprintln!("el modelo interno no está bajado en {}: salteo la prueba", carpeta.display());
-        return;
-    }
+    let Some(interno) = modelo_interno() else { return };
     let base = comun::Base::nueva().await;
-    con_un_modelo_de_verdad(Estado::nuevo(base.pool.clone(), Arc::new(interno))).await;
+    con_un_modelo_de_verdad(Estado::nuevo(base.pool.clone(), interno)).await;
+}
+
+const CUENTA_DE_SENDGRID: &str = "Prod del Inbox comparte la cuenta de SendGrid de la Tienda";
+
+/// Un grupo con la nota de la cuenta compartida entre otras, y otro grupo con
+/// notas que hablan de un «servicio» que no tiene nada que ver. `cuerpo` es
+/// el de la nota de la cuenta, que queda como nota 2.
+async fn tienda_y_otro_grupo(e: &Estado, cuerpo: &str) {
+    empezar(e, "local_f", "ACME", Some("Tienda")).await;
+    empezar(e, "local_p", "Otras", Some("Personal")).await;
+    let notas = [
+        (
+            TipoNota::Decision,
+            "Los pagos de la Tienda van por Mercado Pago",
+            "Decisión: las suscripciones se cobran con Mercado Pago. Por qué: el cliente ya tiene cuenta.",
+            "local_f",
+        ),
+        (TipoNota::Acuerdo, CUENTA_DE_SENDGRID, cuerpo, "local_f"),
+        (
+            TipoNota::Dato,
+            "La app de la Tienda se publica con Expo EAS",
+            "Qué: los builds de iOS y Android salen con EAS Build y se suben a TestFlight.",
+            "local_f",
+        ),
+        (
+            TipoNota::Dato,
+            "El servicio de memoria corre de fondo en la Mac",
+            "Qué: el servicio memoria escucha en un puerto local y arranca con la sesión de macOS.",
+            "local_p",
+        ),
+        (
+            TipoNota::Decision,
+            "La memoria usa SQLite en vez de Postgres",
+            "Decisión: la base del servicio es un archivo de SQLite. Por qué: no depender de un motor instalado.",
+            "local_p",
+        ),
+    ];
+    for (i, (tipo, titulo, cuerpo, sesion)) in notas.iter().enumerate() {
+        let r = mcp::guardar(e, nota(*tipo, titulo, cuerpo, sesion)).await.unwrap();
+        assert!(r.starts_with(&format!("Guardada como nota {}", i + 1)), "{r}");
+    }
+}
+
+fn solo_notas(consulta: &str, sesion: &str) -> mcp::PedidoBuscar {
+    let mut pedido = busqueda(consulta, sesion);
+    pedido.conversaciones = false;
+    pedido
+}
+
+/// La falla de la mejora 1, por palabras (sin modelo de huellas): quien
+/// pregunta por «los correos» encuentra la nota que dice «mail», aunque las
+/// dos palabras no tengan nada en común.
+#[tokio::test]
+async fn los_correos_encuentran_lo_guardado_como_mail() {
+    let base = comun::Base::nueva().await;
+    let e = estado_sin_huellas(base.pool.clone()).await;
+    tienda_y_otro_grupo(
+        &e,
+        "Qué: el mail del Inbox en prod sale con la cuenta de SendGrid de la Tienda. Por qué: el cliente no quiso otra cuenta.",
+    )
+    .await;
+
+    // De las tres palabras la nota tiene una: aparece igual, antes que las de otro grupo.
+    let r = mcp::buscar(&e, &solo_notas("con qué servicio mandamos los correos", "local_f")).await.unwrap();
+    let primera = r.lines().nth(1).unwrap_or_default();
+    assert!(primera.starts_with("1. [nota 2] acuerdo · vigente") && primera.contains(CUENTA_DE_SENDGRID), "{r}");
+
+    // Con todas las palabras, dichas de cualquiera de las formas, la coincidencia es firme.
+    for consulta in ["los correos del Inbox", "emails del inbox", "el e-mail del Inbox"] {
+        let r = mcp::buscar(&e, &solo_notas(consulta, "local_f")).await.unwrap();
+        let primera = r.lines().nth(1).unwrap_or_default();
+        assert!(primera.starts_with("1. [nota 2] acuerdo · vigente"), "«{consulta}»: {r}");
+        assert!(!primera.contains("coincide solo en parte"), "«{consulta}»: {r}");
+    }
+}
+
+/// La falla de la mejora 1, por significado, con el modelo de verdad: la nota
+/// no comparte ninguna palabra con la pregunta (ni «mail») y el modelo, que
+/// lee «correos» como cartas, la dejaba por debajo del piso. La misma
+/// pregunta con «(mails, emails)» a la vista la deja bien por encima.
+#[tokio::test]
+async fn con_el_modelo_interno_los_correos_encuentran_la_cuenta_de_sendgrid() {
+    let Some(interno) = modelo_interno() else { return };
+    let base = comun::Base::nueva().await;
+    let e = Estado::nuevo(base.pool.clone(), interno);
+    tienda_y_otro_grupo(
+        &e,
+        "Acuerdo: el Inbox de producción no tiene cuenta propia; sale por la de la Tienda, con un subusuario y el dominio del cliente autenticado.",
+    )
+    .await;
+
+    for consulta in ["con qué servicio mandamos los correos", "qué cuenta de SendGrid usa el Inbox en producción"] {
+        let r = mcp::buscar(&e, &solo_notas(consulta, "local_f")).await.unwrap();
+        let primera = r.lines().nth(1).unwrap_or_default();
+        assert!(primera.starts_with("1. [nota 2] acuerdo · vigente"), "«{consulta}»: {r}");
+        assert!(!primera.contains("coincide solo en parte"), "«{consulta}»: {r}");
+    }
 }
 
 /// Lo que tiene que pasar con cualquier modelo de huellas que se ofrezca:
