@@ -418,6 +418,46 @@ where
         .await?)
 }
 
+/// Si una conversación tiene, o está por tener, una mejora a la que lanzarle el agente.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PorLanzar {
+    /// Hay una con la copia lista.
+    Lista,
+    /// El guardián está por dejarla lista: recién aceptada, armando la copia
+    /// o rearmándola porque el agente anterior no terminó.
+    EnCamino,
+    Nada,
+}
+
+/// Dice si hay algo que la conversación `sesion` pueda lanzar ya, o que vaya
+/// a poder en un momento. Sirve para esperar unos segundos al guardián sin
+/// preguntar de más.
+pub async fn por_lanzar(pool: &SqlitePool, sesion: &str) -> Resultado<PorLanzar> {
+    let Some((conversacion, grupo)) = esta_conversacion(pool, sesion).await? else {
+        return Ok(PorLanzar::Nada);
+    };
+    let listas: i64 =
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from mejoras m where {PUEDE_LANZAR}")))
+            .bind(&conversacion)
+            .bind(base::ahora() - Duration::hours(HORAS_PARA_EL_GRUPO))
+            .bind(grupo)
+            .fetch_one(pool)
+            .await?;
+    if listas > 0 {
+        let hay_lugar = agentes_trabajando(pool).await? < AGENTES_A_LA_VEZ;
+        return Ok(if hay_lugar { PorLanzar::Lista } else { PorLanzar::Nada });
+    }
+    let en_camino: i64 = sqlx::query_scalar(
+        "select count(*) from mejoras
+         where conversacion = ?1
+           and (estado = 'aceptada' or (estado = 'en_curso' and fase in ('preparando', 'agente_fallo')))",
+    )
+    .bind(&conversacion)
+    .fetch_one(pool)
+    .await?;
+    Ok(if en_camino > 0 { PorLanzar::EnCamino } else { PorLanzar::Nada })
+}
+
 /// Marca como avisadas las mejoras de `vistos` (el mod ya las mostró), anota
 /// que los agentes de `agentes` siguen andando en esta conversación y
 /// devuelve lo pendiente para ella. Un aviso que quedó sin mostrar en una

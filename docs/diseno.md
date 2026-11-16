@@ -368,6 +368,15 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
 - **Si el guardián le saca la mejora a un agente que sigue vivo**, el mod se entera en la vuelta siguiente y desde ahí le niega todo, para que termine.
 - **Lo que cambia para el usuario:** no hay llave; el agente trabaja solo con la conversación abierta; y se ve entre las tareas de fondo de esa conversación.
 
+**Lo que enseñó la primera corrida real (14 al 16/11/2026).** La primera mejora de verdad lanzó al agente sin llave, pero en la carpeta de la conversación y sin ninguno de sus límites. Se lo detuvo al minuto; solo había intentado leer archivos que no existían y listar una carpeta. Con un mod de prueba (una «sonda»: agentes que solo podían leer un archivo) se vio por qué, y quedó así:
+- **Dónde se lanza.** Los ganchos de un mod alcanzan a un agente solo si el mod lo lanzó mientras atendía algo de la conversación. Lanzado después, por su cuenta (desde un reloj), el agente corre fuera de todos los ganchos del mod: no ve sus llamadas ni decide sus permisos; solo se entera de que terminó. Por eso el mod ya no lanza desde el reloj: lo hace adentro del gancho de `memoria_mejorar` (esperando unos segundos a que el guardián arme la copia), al terminar un turno de la conversación, con un mensaje del usuario o al terminar un agente que no pudo. El reloj solo pregunta, avisa y vigila.
+- **La espera la hace el servicio.** Adentro de un gancho el mod no puede quedarse dormido, así que `memoria_mejora_estado` acepta `esperar_ms`: contesta apenas la copia está lista, o enseguida si no hay ninguna en camino.
+- **El freno.** El mod anota el arranque de cada agente (`turn.start`). Si lanzó uno y no escuchó su arranque, sus límites no lo alcanzan: lo detiene en el acto (con la herramienta de la app para detener tareas) y lo anota como caído. Lo mismo si el mod se recarga con un agente trabajando, o si el guardián le saca la mejora.
+- **La carpeta.** La app no respeta la carpeta que pide un mod al lanzar: el agente arranca en la de la conversación. El pedido dice dónde está la copia y el mod completa ahí cada ruta relativa; `cargo` entra solo a la copia.
+- **El informe.** El agente lo entrega por una vía propia de la app (`SubagentHandback`), que la app revisa sola. El mod no la toca: si intenta aprobarla él, la app la rechaza.
+- **Sin el mod, el agente no escribe.** Con `permissionMode: dontAsk`, lo que el mod no aprueba queda negado: un agente fuera de sus límites puede leer, pero no editar ni correr nada que cambie algo. Es la red de abajo; el freno hace que ni siquiera llegue a leer.
+- **Una conversación abierta no conoce las herramientas nuevas del servicio** hasta que se reinicia: lo que el mod necesite del servicio tiene que ir por herramientas que ya existían.
+
 **Concurrencia:**
 - Hasta 2 agentes a la vez. La instalación se hace en fila.
 - Si una mejora quedó vieja porque otra instaló antes y no se puede combinar, el agente la rehace sobre la versión nueva, con un reintento como máximo.

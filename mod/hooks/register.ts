@@ -17,6 +17,13 @@
 // esta conversación (con la sesión de Claude que ya está abierta, sin ninguna
 // llave), le aprueba solo lo que puede hacer y le niega todo lo demás, sin
 // que la app le pregunte nada al usuario, y avisa cuando termina.
+//
+// Una regla que no se puede romper: al agente se lo lanza siempre desde
+// adentro de un gancho que está atendiendo algo de la conversación (la
+// llamada que acepta la mejora, el fin de un turno, un mensaje). Los ganchos
+// del mod no alcanzan a un agente lanzado fuera de ahí, por ejemplo desde un
+// reloj: queda sin límites. Por si igual pasara, hay un freno: si el mod no
+// escucha el arranque del agente, lo detiene antes de que haga nada.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
@@ -53,6 +60,12 @@ const ESPERA_REVISION_MS = 3_000
 // Mientras haya una mejora en curso lanzada desde acá, cada cuánto se pregunta por ella.
 const CADA_MEJORA_MS = 10_000
 const HERRAMIENTA_MEJORAR = 'mcp__memoria__memoria_mejorar'
+// Con qué entrega un agente su informe final: lo revisa la app, no el mod.
+const ENTREGA = 'SubagentHandback'
+// Con qué se detiene a un agente.
+const FRENO = 'TaskStop'
+// Cuánto se le da al guardián para armar la copia cuando se espera adentro de un gancho.
+const ESPERA_COPIA_MS = 12_000
 const SIN_RESUMEN = 'El agente terminó, pero no quedó registrado su resumen.'
 
 // Cambiar la etiqueta si cambian los campos (o si lo guardado por una versión
@@ -246,6 +259,12 @@ let problemaContado = ''
 // Mientras se lanza uno: su primera llamada no puede adelantarse a que quede anotado.
 let lanzando: Promise<void> | null = null
 let tipoRegistrado = false
+// Los agentes cuyo arranque escuchó el mod: es la señal de que sus límites los alcanzan.
+const arrancados = new Set<string>()
+// Si, por lo último que dijo el servicio, hay alguna mejora esperando que esta conversación lance su agente.
+let porLanzar = false
+// Un solo lanzamiento a la vez.
+let lanzandoPendientes: Promise<void> | null = null
 // Agentes que la app dejó de nombrar, o que da por terminados sin que haya
 // llegado su fin de turno: se les da una vuelta más antes de soltarlos.
 const dudosos = new Set<string>()
@@ -359,7 +378,20 @@ async function buscarAgente($: EngineInterface, descripcion: string): Promise<st
   )?.id
 }
 
-// Toma una mejora para esta conversación y lanza su agente, de fondo.
+// Detiene a un agente. Es el freno: uno al que no se le pudieron poner los
+// límites, o al que el guardián le sacó la mejora, no tiene que seguir.
+async function detener($: EngineInterface, agentId: string): Promise<boolean> {
+  try {
+    const r = await $.tool.call({ tool: FRENO, task_id: agentId } as never)
+
+    return (r as { deny?: string }).deny === undefined
+  } catch {
+    return false
+  }
+}
+
+// Toma una mejora para esta conversación y lanza su agente, de fondo. Solo
+// se llama desde `lanzarPendientes`, que corre adentro de un gancho.
 async function lanzarAgente($: EngineInterface, sesion: string, encargo: Encargo): Promise<void> {
   if (!(await registrarTipo($))) {
     // Se prueba de nuevo en la próxima vuelta. Si no hay caso, se anota como
@@ -385,14 +417,15 @@ async function lanzarAgente($: EngineInterface, sesion: string, encargo: Encargo
   let motivo: string
   try {
     const descripcion = `Mejora ${encargo.id} de la memoria`
+    // La app no deja elegirle la carpeta: trabaja en la de la conversación, y
+    // es el mod quien le lleva cada ruta a su copia.
     const r = await $.agent.spawn({
       prompt: encargo.pedido,
       description: descripcion,
       subagentType: TIPO_AGENTE,
-      cwd: encargo.copia,
     })
     const agentId = r.deny === undefined ? (r.agentId ?? (await buscarAgente($, descripcion))) : undefined
-    if (agentId !== undefined) {
+    if (agentId !== undefined && arrancados.has(agentId)) {
       propios.add(agentId)
       await update($, agentes, prev => ({
         lanzados: {
@@ -404,7 +437,21 @@ async function lanzarAgente($: EngineInterface, sesion: string, encargo: Encargo
 
       return
     }
-    motivo = `Claude no dejó lanzar el agente: ${r.deny ?? 'no arrancó ninguno'}`
+    if (agentId !== undefined) {
+      // El mod no escuchó su arranque: sus límites no lo alcanzan. Se lo
+      // frena ya, y queda anotado como anulado por si la app tarda en pararlo.
+      propios.add(agentId)
+      const frenado = await detener($, agentId)
+      await update($, agentes, prev => ({
+        lanzados: {
+          ...prev.lanzados,
+          [agentId]: { mejora: encargo.id, copia: encargo.copia, cargo: encargo.cargo, anulado: true as const },
+        },
+      }))
+      motivo = frenado
+        ? 'No pude ponerle los límites al agente: lo detuve antes de que hiciera nada.'
+        : 'No pude ponerle los límites al agente ni detenerlo.'
+    } else motivo = `Claude no dejó lanzar el agente: ${r.deny ?? 'no arrancó ninguno'}`
   } catch (err) {
     motivo = `No pude lanzar el agente: ${motivoDe(err)}`
   } finally {
@@ -443,9 +490,63 @@ async function terminoAgente(
   vigilar($)
 }
 
-// Lo que toca hacer con los agentes en cada vuelta: avisar lo que quedó sin
-// avisar, soltar a los que ya no corren o ya no tienen la mejora, y lanzar
-// los que esperan.
+// Lanza los agentes de las mejoras que esperan a esta conversación. Hay que
+// llamarla, y esperarla, desde adentro de un gancho que esté atendiendo algo
+// de la conversación: es lo que deja al agente al alcance de los límites del
+// mod. `esperarMs` es cuánto se le da al guardián para terminar de armar la
+// copia (el servicio contesta apenas está lista).
+function lanzarPendientes($: EngineInterface, esperarMs = 0): Promise<void> {
+  if (lanzandoPendientes) return lanzandoPendientes
+  const p = (async () => {
+    const c = await read($, contexto)
+    if (!c || !c.sesion) return
+    const estado = leerEstado(
+      await pedirMemoria($, 'memoria_mejora_estado', {
+        sesion: c.sesion,
+        vistos: [],
+        ...(esperarMs > 0 ? { esperar_ms: esperarMs } : {}),
+      }),
+    )
+    const propias = Object.values((await read($, agentes)).lanzados)
+      .filter(a => !a.anulado)
+      .map(a => a.mejora)
+    for (const encargo of estado.paraAgente) {
+      if (!propias.includes(encargo.id)) await lanzarAgente($, c.sesion, encargo)
+    }
+    porLanzar = false
+    if (estado.enCurso.length > 0 || estado.paraAgente.length > 0) vigilar($)
+  })()
+    .catch(err => {
+      // Queda a la vista con /memoria y se prueba de nuevo en la próxima ocasión.
+      problema = `No pude lanzar al agente de la memoria: ${motivoDe(err)}`
+    })
+    .finally(() => {
+      lanzandoPendientes = null
+    })
+  lanzandoPendientes = p
+
+  return p
+}
+
+// Al cargarse el mod con un agente anotado de antes (se actualizó el mod, o
+// la app se reinició): ya no se puede asegurar que sus límites lo alcancen.
+// Se lo frena y se anota como caído, para que el guardián arme la copia de
+// nuevo y el próximo se lance con los límites puestos.
+async function soltarAgentesDeAntes($: EngineInterface): Promise<void> {
+  for (const [agentId, a] of Object.entries((await read($, agentes)).lanzados)) {
+    // El que ya terminó y solo espera que se avise cómo, sigue su camino.
+    if (a.aviso) continue
+    await detener($, agentId)
+    await terminoAgente($, agentId, {
+      paso: 'fallo',
+      texto: 'La memoria se recargó mientras el agente trabajaba.',
+    })
+  }
+}
+
+// Lo que toca hacer con los agentes en cada vuelta del reloj: avisar lo que
+// quedó sin avisar y soltar a los que ya no corren o ya no tienen la mejora.
+// Desde acá no se lanza ninguno: eso va adentro de un gancho.
 async function atenderAgentes($: EngineInterface, sesion: string, estado: EstadoMejoras): Promise<void> {
   for (const [agentId, a] of Object.entries((await read($, agentes)).lanzados)) {
     if (!a.aviso) continue
@@ -464,13 +565,15 @@ async function atenderAgentes($: EngineInterface, sesion: string, estado: Estado
       const enLaApp = lista?.find(x => x.id === agentId)
       const andando = enLaApp !== undefined && !TERMINADO.includes(enLaApp.status)
       if (a.anulado) {
-        // Se olvida cuando la app ya no lo tiene corriendo.
+        // Se olvida cuando la app ya no lo tiene corriendo; si sigue, se lo frena de nuevo.
         if (lista !== null && !andando) await update($, agentes, prev => sin(prev, agentId))
+        else if (andando) await detener($, agentId)
         continue
       }
       // Para el servicio ya no corre acá: el guardián le sacó la mejora.
       if (!estado.conAgente.includes(a.mejora)) {
         await update($, agentes, prev => con(prev, agentId, { anulado: true }))
+        await detener($, agentId)
         continue
       }
       if (lista === null || andando) {
@@ -496,12 +599,11 @@ async function atenderAgentes($: EngineInterface, sesion: string, estado: Estado
     }
   }
 
+  // Las que esperan se lanzan en el próximo gancho de la conversación.
   const propias = Object.values((await read($, agentes)).lanzados)
     .filter(a => !a.anulado)
     .map(a => a.mejora)
-  for (const encargo of estado.paraAgente) {
-    if (!propias.includes(encargo.id)) await lanzarAgente($, sesion, encargo)
-  }
+  porLanzar = estado.paraAgente.some(encargo => !propias.includes(encargo.id))
 }
 
 // ---------- mejoras ----------
@@ -511,8 +613,9 @@ let revisando = false
 
 // Pregunta por las mejoras de esta conversación. Las que terminaron se
 // muestran en el chat y, si alguna se instaló, se le pide a Claude que retome
-// lo que había fallado. De paso avisa qué agentes siguen andando acá y lanza
-// los que esperan. Mientras quede algo en curso, sigue preguntando.
+// lo que había fallado. De paso avisa qué agentes siguen andando acá y anota
+// si alguna mejora espera que se lance el suyo. Mientras quede algo en curso,
+// sigue preguntando.
 async function revisarMejoras($: EngineInterface): Promise<void> {
   if (revisando) return
   revisando = true
@@ -649,6 +752,7 @@ export const register: Register = on => {
     // y, si cambió, Claude lo recibe con el próximo mensaje.
     void lanzar($)
     void registrarTipo($)
+    void soltarAgentesDeAntes($).catch(() => undefined)
     try {
       await $.command.register({
         name: 'memoria',
@@ -695,6 +799,8 @@ export const register: Register = on => {
   // desde lo último que recibió Claude, se adjunta.
   on('prompt.submit', async ($, e, next) => {
     if (e.command !== undefined) return next(e)
+    // Si una mejora quedó esperando a su agente, se lo lanza acá, adentro del gancho.
+    if (porLanzar) await lanzarPendientes($)
     await conLimite($, revisarGrupo($), ESPERA_REVISION_MS)
     if (enCurso) await conLimite($, enCurso, ESPERA_INSTRUCCIONES_MS)
     const c = await read($, contexto)
@@ -732,19 +838,33 @@ export const register: Register = on => {
       compusoDesdeMensaje = true
       await update($, entrega, prev => (prev.compuesto ? prev : { compuesto: true, clave: null }))
     }
+    // Terminó un turno de la conversación: buen momento para lanzar al
+    // agente de una mejora que quedó lista (acá adentro, para que tenga sus límites).
+    if (e.agentId === undefined && (porLanzar || vigia !== undefined)) await lanzarPendientes($)
     // Terminó un agente: si es de la memoria, lo último que dijo es su informe.
     if (e.agentId !== undefined && !ajenos.has(e.agentId)) {
       const informe = e.answer.trim()
+      const bien = e.reason === 'answer' && informe !== ''
+      const eraDeLaMemoria = (await read($, agentes)).lanzados[e.agentId] !== undefined
       await terminoAgente(
         $,
         e.agentId,
-        e.reason === 'answer' && informe !== ''
-          ? { paso: 'termino', texto: informe }
-          : { paso: 'fallo', texto: motivoDelCorte(e.reason) },
+        bien ? { paso: 'termino', texto: informe } : { paso: 'fallo', texto: motivoDelCorte(e.reason) },
       ).catch(() => undefined)
+      // Si no terminó bien, el guardián arma la copia de nuevo: se lo espera
+      // un momento y el próximo agente se lanza desde acá.
+      if (eraDeLaMemoria && !bien) await lanzarPendientes($, ESPERA_COPIA_MS)
     }
 
     return r
+  })
+
+  // El arranque de cada agente. Que el mod lo escuche es la señal de que sus
+  // límites lo alcanzan: `lanzarAgente` frena al que arrancó sin que se oyera.
+  on('turn.start', ($, e, next) => {
+    if (e.agentId !== undefined) arrancados.add(e.agentId)
+
+    return next(e)
   })
 
   // Al resumir la conversación, lo adjunto a mensajes viejos se puede perder:
@@ -772,7 +892,12 @@ export const register: Register = on => {
   // ella hasta que termine.
   on('tool.call', { tool: HERRAMIENTA_MEJORAR }, async ($, e, next) => {
     const r = await next(e)
-    if (r.deny === undefined) vigilar($)
+    if (r.deny === undefined) {
+      vigilar($)
+      // El agente se lanza acá mismo, mientras se atiende esta llamada: se le
+      // dan unos segundos al guardián para armar la copia.
+      if (e.agentId === undefined) await lanzarPendientes($, ESPERA_COPIA_MS)
+    }
 
     return r
   })
@@ -787,7 +912,13 @@ export const register: Register = on => {
     if (e.agentId === undefined) return next(e)
     const a = await agenteDe($, e.agentId)
     if (a === null) return next(e)
-    if (a === 'sin-encargo') return { deny: SIN_ENCARGO }
+    // Su informe final va por una vía de la app, que la app revisa sola.
+    if ((e.tool as string) === ENTREGA) return next(e)
+    if (a === 'sin-encargo') {
+      void detener($, e.agentId)
+
+      return { deny: SIN_ENCARGO }
+    }
     const v = revisar(a, e.tool, e as unknown as Record<string, unknown>)
     if ('deny' in v) return { deny: v.deny }
 
@@ -805,7 +936,8 @@ export const register: Register = on => {
   on('tool.check', async ($, e, next) => {
     if (e.agentId === undefined) return next(e)
     const a = await agenteDe($, e.agentId)
-    if (a === null) return next(e)
+    // El permiso de la entrega del informe lo decide la app: un mod no puede aprobarlo.
+    if (a === null || e.tool === ENTREGA) return next(e)
     if (a === 'sin-encargo') return { decision: 'deny' as const, reason: SIN_ENCARGO }
     const args = typeof e.input === 'object' && e.input !== null ? (e.input as Record<string, unknown>) : {}
     const motivo = enRegla(a, e.tool, args)

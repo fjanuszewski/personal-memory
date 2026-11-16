@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "guardian"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1457,7 +1457,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memoria"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "axum",

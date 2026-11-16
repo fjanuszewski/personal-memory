@@ -63,6 +63,8 @@ Con `sesion` en vez de `id`, `memoria_mejora_estado` es además el canal del mod
    - edita solo `crates/servicio/` y `migraciones/`;
    - lo único que corre es `cargo build`, `check`, `test`, `clippy` y `fmt`, con el entorno mínimo (nada de la conversación pasa a lo que se compila) y sin red, salvo que el usuario haya aceptado sumar librerías;
    - no tiene internet ni ninguna otra herramienta.
+
+   El mod lo lanza siempre mientras atiende algo de la conversación (la llamada que acepta la mejora, el fin de un turno, un mensaje): es la única forma de que sus límites alcancen al agente. Y tiene un freno: si no escucha el arranque del agente, lo detiene antes de que haga nada.
 5. **Cuando el agente termina, el guardián lo revisa todo:**
    - que no haya tocado nada más, ni cambiado la base, borrado datos o sumado librerías sin que el usuario lo haya aceptado;
    - compila, corre las pruebas y el revisor de código;
@@ -72,7 +74,7 @@ Con `sesion` en vez de `id`, `memoria_mejora_estado` es además el canal del mod
 
 Hasta dos mejoras se trabajan a la vez. Si una se instala mientras otra estaba en marcha, la segunda se rehace sobre la versión nueva (una vez).
 
-El agente trabaja mientras la conversación donde se aceptó la mejora esté abierta. Si se cierra antes de que termine, la mejora queda esperando: el guardián arma la copia de nuevo y el agente arranca otra vez cuando esa conversación se vuelve a abrir (o, si pasan unas horas, en otra del mismo grupo). Un agente que no termina se lanza hasta tres veces; después la mejora queda sin instalar, con el motivo a la vista en el chat. Usa el plan de Claude del usuario, como cualquier otra tarea de fondo de la conversación.
+El agente trabaja mientras la conversación donde se aceptó la mejora esté abierta. Si se cierra antes de que termine, la mejora queda esperando: el guardián arma la copia de nuevo y el agente arranca otra vez cuando se vuelve a escribir en esa conversación (o, si pasan unas horas, en otra del mismo grupo). Un agente que no termina se lanza hasta tres veces; después la mejora queda sin instalar, con el motivo a la vista en el chat. Usa el plan de Claude del usuario, como cualquier otra tarea de fondo de la conversación.
 
 Cada mejora parte del commit de git del que salió lo instalado (`~/.memoria/instalada`). Si se instaló con cambios sin guardar en git, las mejoras quedan en pausa hasta guardarlos y correr el instalador de nuevo. Lo que hace cada mejora queda en su rama (`mejora-N-…`) dentro de `~/.memoria/codigo`, y la rama `instalada` de esa copia se adelanta a la versión nueva. El repositorio donde se desarrolla no se toca.
 

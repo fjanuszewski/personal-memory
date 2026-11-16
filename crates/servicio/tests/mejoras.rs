@@ -480,3 +480,48 @@ async fn una_mejora_sin_su_conversacion_la_toma_otra_del_grupo() {
     assert_eq!(agentes(&e, "local_a", &[]).await.0, vec![3]);
     assert!(paso(&e, 3, "local_a", "empezo", None).await);
 }
+
+#[tokio::test]
+async fn espera_un_momento_a_que_el_guardian_arme_la_copia() {
+    use std::time::{Duration, Instant};
+
+    let base = comun::Base::nueva().await;
+    let pool = base.pool.clone();
+    let e = estado(pool.clone()).await;
+    empezar(&e, "local_a", "ACME", Some("Portal")).await;
+    empezar(&e, "local_b", "ACME", Some("Portal")).await;
+    mcp::reportar(&e, &reporte("entregas del viernes", "local_a")).await.unwrap();
+    mcp::reportar(&e, &reporte("paginación de los listados", "local_a")).await.unwrap();
+    aceptar(&e, 1, "local_a").await.unwrap();
+    let esperando = |sesion: &str, ms: u64| PedidoEstado {
+        sesion: Some(sesion.into()),
+        esperar_ms: Some(ms),
+        ..PedidoEstado::default()
+    };
+    let por_lanzar = |texto: String| ids(&serde_json::from_str::<Value>(&texto).unwrap()["para_agente"]);
+
+    // Una conversación que no tiene nada en camino no espera.
+    let antes = Instant::now();
+    assert_eq!(por_lanzar(mcp::mejora_estado(&e, &esperando("local_b", 5_000)).await.unwrap()), Vec::<i64>::new());
+    assert!(antes.elapsed() < Duration::from_millis(1_000), "{:?}", antes.elapsed());
+
+    // Recién aceptada y todavía sin copia: espera, y contesta apenas el guardián la deja lista.
+    let del_guardian = pool.clone();
+    let guardian = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        dejar_lista(&del_guardian, 1, 0).await;
+    });
+    let antes = Instant::now();
+    assert_eq!(por_lanzar(mcp::mejora_estado(&e, &esperando("local_a", 8_000)).await.unwrap()), vec![1]);
+    let tardo = antes.elapsed();
+    assert!(tardo >= Duration::from_millis(500) && tardo < Duration::from_millis(4_000), "{tardo:?}");
+    guardian.await.unwrap();
+
+    // Con una lista no espera a las demás; y si la que falta no llega, contesta igual al cumplirse el plazo.
+    assert!(paso(&e, 1, "local_a", "empezo", None).await);
+    aceptar(&e, 2, "local_a").await.unwrap();
+    let antes = Instant::now();
+    assert_eq!(por_lanzar(mcp::mejora_estado(&e, &esperando("local_a", 500)).await.unwrap()), Vec::<i64>::new());
+    let tardo = antes.elapsed();
+    assert!(tardo >= Duration::from_millis(450) && tardo < Duration::from_millis(3_000), "{tardo:?}");
+}

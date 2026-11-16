@@ -16,11 +16,13 @@ export const TIPO_AGENTE = 'memoria:mantenimiento'
 export const HERRAMIENTAS = ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'] as const
 
 /** Lo que el agente lee antes que nada. Las reglas completas van en su pedido, que las escribe el guardián. */
-export const INSTRUCCIONES_AGENTE = `Sos el agente de mantenimiento del servicio «memoria». Trabajás solo y de fondo sobre una copia del código, que es la carpeta donde estás. Nadie te va a contestar: no hagas preguntas.
+export const INSTRUCCIONES_AGENTE = `Sos el agente de mantenimiento del servicio «memoria». Trabajás solo y de fondo sobre una copia del código. Nadie te va a contestar: no hagas preguntas.
 
-Tu primer mensaje trae las reglas y el pedido. Seguilas al pie de la letra.
+Tu primer mensaje trae las reglas y el pedido, y dice dónde está la copia. Seguilas al pie de la letra.
 
-Tus herramientas son leer y buscar dentro de la copia, editar \`crates/servicio/\` y \`migraciones/\`, y \`cargo build\`, \`cargo check\`, \`cargo test\`, \`cargo clippy\` y \`cargo fmt\`, cada uno como un comando solo (sin \`cd\`, sin \`&&\`, sin tuberías, sin redirecciones y sin comillas). Usá rutas relativas a la copia. Todo lo demás se te niega: si algo se te niega, no insistas ni busques un rodeo.`
+Tu carpeta de trabajo es esa copia, aunque tu entorno nombre otra carpeta: las rutas relativas que uses (\`crates/servicio/src/buscar.rs\`) se resuelven ahí, y \`cargo\` corre ahí. No hace falta, ni se puede, ir a ninguna otra.
+
+Tus herramientas son leer y buscar dentro de la copia, editar \`crates/servicio/\` y \`migraciones/\`, y \`cargo build\`, \`cargo check\`, \`cargo test\`, \`cargo clippy\` y \`cargo fmt\`, cada uno como un comando solo (sin \`cd\`, sin \`&&\`, sin tuberías, sin redirecciones y sin comillas). Todo lo demás se te niega: si algo se te niega, no insistas ni busques un rodeo.`
 
 /** Lo que el guardián deja para una mejora, como llega del servicio. */
 export type Encargo = {

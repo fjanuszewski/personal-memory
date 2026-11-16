@@ -70,10 +70,17 @@ pub fn reporte(m: &Mejora) -> String {
     texto
 }
 
-/// Lo que se le pide al agente: las reglas fijas y, después, el reporte.
+/// Lo que se le pide al agente: las reglas fijas, el reporte y dónde está la
+/// copia del código. La app lo hace arrancar en la carpeta de la
+/// conversación, no en la copia: por eso hay que decírselo.
 #[must_use]
-pub fn pedido(m: &Mejora) -> String {
-    format!("{}\n\n## El pedido\n\n{}", INSTRUCCIONES.trim_end(), reporte(m))
+pub fn pedido(m: &Mejora, copia: &Path) -> String {
+    format!(
+        "{}\n\n## El pedido\n\n{}\n\n## Dónde trabajar\n\nLa copia del código está en `{}`. Las rutas relativas que uses se resuelven ahí.",
+        INSTRUCCIONES.trim_end(),
+        reporte(m),
+        copia.display()
+    )
 }
 
 /// Donde queda el `cargo` de una mejora: al lado de su copia del código y
@@ -126,7 +133,7 @@ impl Encargo {
     /// Arma el encargo de una mejora cuya copia del código ya está en `copia`.
     pub fn armar(cfg: &Config, m: &Mejora, copia: &Path) -> anyhow::Result<Self> {
         let cargo = dejar_cargo(cfg, copia, m.permisos.suma_librerias)?;
-        Ok(Self { copia: copia.display().to_string(), cargo: cargo.display().to_string(), pedido: pedido(m) })
+        Ok(Self { copia: copia.display().to_string(), cargo: cargo.display().to_string(), pedido: pedido(m, copia) })
     }
 }
 
@@ -181,10 +188,14 @@ mod pruebas {
 
     #[test]
     fn el_pedido_empieza_por_las_reglas() {
-        let texto = pedido(&mejora());
+        let texto = pedido(&mejora(), Path::new("/Users/ana/.memoria/trabajo/mejora-7"));
         assert!(texto.starts_with("Sos el agente de mantenimiento"), "{texto}");
         let (reglas, reporte) = texto.split_once("\n\n## El pedido\n\n").expect("las reglas y, después, el pedido");
         assert!(reporte.starts_with("Mejora 7 de la memoria."));
+        // Y termina diciendo dónde está la copia, porque la app no lo hace arrancar ahí.
+        assert!(texto.ends_with(
+            "está en `/Users/ana/.memoria/trabajo/mejora-7`. Las rutas relativas que uses se resuelven ahí."
+        ));
         // Las reglas nombran lo que no se toca y cómo se usa `cargo`.
         for protegido in ["crates/guardian/", "bateria/", "instalacion/", "mod/", "sin tuberías"] {
             assert!(reglas.contains(protegido), "{protegido}");
