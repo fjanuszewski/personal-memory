@@ -115,23 +115,22 @@ async fn envejecer(pool: &SqlitePool, espacio: &str, horas: i64) {
         .unwrap();
 }
 
-#[tokio::test]
-async fn el_mod_trae_de_la_conexion_lo_que_el_servicio_le_pide() {
-    let base = comun::Base::nueva().await;
-    let e = con_fuentes(base.pool.clone(), encendidas(vec![sin_llave("acme")])).await;
-
+/// La primera lectura de un espacio, de punta a punta, contada como la hace el
+/// mod: sin la conexión, con ella, el perfil, dos páginas y la búsqueda que ya
+/// no trae nada nuevo.
+async fn primera_lectura(e: &Estado) {
     // Una conversación sin la conexión de Slack no tiene nada que traer.
-    assert_eq!(pedir(&e, "s1", PasoDeFuente::default()).await, Value::Null);
+    assert_eq!(pedir(e, "s1", PasoDeFuente::default()).await, Value::Null);
     // La que la tiene recibe el primer pedido: quién es el usuario en ese espacio.
-    assert_eq!(pedir(&e, "s1", con_slack()).await, json!({ "espacio": "acme", "pedir": "perfil" }));
+    assert_eq!(pedir(e, "s1", con_slack()).await, json!({ "espacio": "acme", "pedir": "perfil" }));
     // Mientras lee una, a las demás no se les pide nada, y lo que traigan no vale.
-    assert_eq!(pedir(&e, "s2", con_slack()).await, Value::Null);
+    assert_eq!(pedir(e, "s2", con_slack()).await, Value::Null);
     let ajena = pagina(&[resultado("DM (ID: D0LUIS)", CON_LUIS, YO, 0, "esto lo trae quien no tiene el turno")], None);
-    assert_eq!(pedir(&e, "s2", con_pagina("acme", ajena)).await, Value::Null);
+    assert_eq!(pedir(e, "s2", con_pagina("acme", ajena)).await, Value::Null);
     assert_eq!(guardados(&e.pool).await.len(), 0);
 
     // Con el perfil, pide la búsqueda desde el principio.
-    let busqueda = pedir(&e, "s1", con_perfil("acme")).await;
+    let busqueda = pedir(e, "s1", con_perfil("acme")).await;
     assert_eq!(
         busqueda,
         json!({ "espacio": "acme", "pedir": "buscar", "usuario": YO, "despues": null, "cursor": null, "pausa_ms": 1500 })
@@ -152,7 +151,7 @@ async fn el_mod_trae_de_la_conexion_lo_que_el_servicio_le_pide() {
         ],
         Some("Q1VSU09S"),
     );
-    let sigue = pedir(&e, "s1", con_pagina("acme", primera)).await;
+    let sigue = pedir(e, "s1", con_pagina("acme", primera)).await;
     assert_eq!((sigue["pedir"].as_str(), sigue["cursor"].as_str()), (Some("buscar"), Some("Q1VSU09S")), "{sigue}");
     assert_eq!(sigue["despues"], Value::Null, "el mismo pedido, en la página que sigue");
 
@@ -184,7 +183,18 @@ async fn el_mod_trae_de_la_conexion_lo_que_el_servicio_le_pide() {
         ],
         None,
     );
-    assert_eq!(pedir(&e, "s1", con_pagina("acme", segunda)).await, Value::Null, "terminó");
+    // La conexión no dio más páginas, pero corta cada búsqueda antes del final:
+    // como se avanzó, se busca de nuevo desde el último mensaje visto…
+    let ultimo = (AHORA + 6 * 60).to_string();
+    let de_nuevo = pedir(e, "s1", con_pagina("acme", segunda)).await;
+    assert_eq!(
+        (de_nuevo["pedir"].as_str(), de_nuevo["despues"].as_str(), &de_nuevo["cursor"]),
+        (Some("buscar"), Some(ultimo.as_str()), &Value::Null)
+    );
+    // …y recién cuando una búsqueda no trae nada más nuevo, terminó.
+    let repetida =
+        pagina(&[resultado("#random (ID: C0RANDOM)", None, YO, 6, "alguien vio el partido de anoche?")], None);
+    assert_eq!(pedir(e, "s1", con_pagina("acme", repetida)).await, Value::Null, "terminó");
 
     let todos = guardados(&e.pool).await;
     let esperados = [
@@ -202,8 +212,22 @@ async fn el_mod_trae_de_la_conexion_lo_que_el_servicio_le_pide() {
     );
 
     // Recién leído no toca: a nadie se le pide nada, y no hay nada que avisar.
-    assert_eq!(pedir(&e, "s2", con_slack()).await, Value::Null);
-    assert_eq!(fuentes::aviso(&e).await.unwrap(), None);
+    assert_eq!(pedir(e, "s2", con_slack()).await, Value::Null);
+    assert_eq!(fuentes::aviso(e).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn el_mod_trae_de_la_conexion_lo_que_el_servicio_le_pide() {
+    let base = comun::Base::nueva().await;
+    let e = con_fuentes(base.pool.clone(), encendidas(vec![sin_llave("acme")])).await;
+    primera_lectura(&e).await;
+}
+
+#[tokio::test]
+async fn la_lectura_siguiente_sigue_desde_donde_se_llego() {
+    let base = comun::Base::nueva().await;
+    let e = con_fuentes(base.pool.clone(), encendidas(vec![sin_llave("acme")])).await;
+    primera_lectura(&e).await;
 
     // Horas después le toca de nuevo: cualquier conversación sigue desde donde se llegó.
     envejecer(&e.pool, "acme", 7).await;
@@ -220,7 +244,11 @@ async fn el_mod_trae_de_la_conexion_lo_que_el_servicio_le_pide() {
         ],
         None,
     );
-    assert_eq!(pedir(&e, "s2", con_pagina("acme", nueva)).await, Value::Null);
+    let sigue = pedir(&e, "s2", con_pagina("acme", nueva)).await;
+    assert_eq!(sigue["despues"].as_str(), Some((AHORA + 102 * 60).to_string().as_str()), "{sigue}");
+    // Lo que contesta la conexión cuando no hay nada.
+    let nada = json!({ "results": "# Search Results for: \n\nNo results found.\n", "pagination_info": "End of results - No more pages available.\n" });
+    assert_eq!(pedir(&e, "s2", con_pagina("acme", nada.to_string())).await, Value::Null);
     assert_eq!(guardados(&e.pool).await.len(), 6);
     assert_eq!(guardados(&e.pool).await[3].2, "listo, ya te lo mande por mail");
     let lectura = ultima_lectura(&e.pool, "acme").await.unwrap();

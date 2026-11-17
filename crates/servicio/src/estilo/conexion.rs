@@ -69,7 +69,8 @@ pub struct Turno {
     sesion: String,
     espacio: String,
     vence: Instant,
-    /// Desde qué segundo se pidió: va igual en todas las páginas del turno.
+    /// Desde qué segundo pide la búsqueda en curso: va igual en todas sus
+    /// páginas. Un turno puede llevar varias búsquedas, una detrás de otra.
     despues: i64,
     paginas: usize,
     juntado: Juntado,
@@ -471,8 +472,23 @@ async fn recibir(e: &Estado, cfg: &Slack, espacio: &str, paso: &PasoDeFuente) ->
     }
     guardar_pagina(e, cfg, espacio, &usuario, &pagina).await?;
     let (despues, paginas) = turno(e).as_ref().map_or((0, PAGINAS_POR_TURNO), |t| (t.despues, t.paginas));
-    if let Some(cursor) = pagina.cursor.as_deref().filter(|_| pagina.resultados > 0 && paginas < PAGINAS_POR_TURNO) {
+    if paginas >= PAGINAS_POR_TURNO {
+        terminar(e, espacio, Ok(())).await?;
+        return Ok(Sigue::Nada);
+    }
+    if let Some(cursor) = pagina.cursor.as_deref().filter(|_| pagina.resultados > 0) {
         return Ok(Sigue::Pedir(pedir_busqueda(espacio, &usuario, despues, Some(cursor))));
+    }
+    // La conexión no da más páginas de esta búsqueda, pero corta cada una
+    // bastante antes del final: si con esta se avanzó, se busca de nuevo
+    // desde donde se llegó. Recién cuando una búsqueda no trae nada más
+    // nuevo, no queda nada.
+    let llegado = hasta(e, espacio).await? / MICROS;
+    if llegado > despues {
+        if let Some(t) = turno(e).as_mut().filter(|t| t.espacio == espacio) {
+            t.despues = llegado;
+        }
+        return Ok(Sigue::Pedir(pedir_busqueda(espacio, &usuario, llegado, None)));
     }
     terminar(e, espacio, Ok(())).await?;
     Ok(Sigue::Nada)

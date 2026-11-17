@@ -1,6 +1,6 @@
 {
   "name": "memoria",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Memoria a largo plazo por grupo (empresa › proyecto): al empezar cada conversación la registra en el servicio memoria y le pasa a Claude el resumen del grupo y las reglas de uso (buscar por palabras y por significado, guardar y reemplazar notas, y pedir cómo escribe el usuario antes de redactar algo en su nombre). Cuando el usuario acepta que la memoria se arregle sola, lanza de fondo al agente que hace el cambio, dentro de la conversación y con límites fijos.",
   "types": "./types/index.d.ts",
   "author": {
