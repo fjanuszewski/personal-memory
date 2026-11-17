@@ -8,6 +8,7 @@
 //! `memoria_estilo` ([`consultar`]). Todo queda en la
 //! base de esta máquina y no hay ningún modelo de por medio: son cuentas.
 
+pub mod conexion;
 pub mod fuentes;
 pub mod idioma;
 pub mod lexico;

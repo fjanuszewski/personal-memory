@@ -1,14 +1,15 @@
 //! Lo que comparten todas las partes del servicio: la base, las huellas en
 //! memoria, quien las calcula y los umbrales de calidad.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sqlx::SqlitePool;
 use tokio::sync::Notify;
 
 use crate::config::Fuentes;
+use crate::estilo::conexion::Turno;
 use crate::huellas::{Huellas, Uso};
 use crate::indice::Indice;
 
@@ -63,6 +64,9 @@ pub struct Estado {
     /// WhatsApp; cero si no lo está leyendo. Esa lectura puede quedar
     /// esperando a que el usuario le conteste a macOS si la deja.
     pub leyendo_whatsapp: Arc<AtomicI64>,
+    /// Qué conversación está leyendo ahora una fuente por una conexión de
+    /// Claude, si hay alguna: una sola por vez.
+    pub turno_de_fuente: Arc<Mutex<Option<Turno>>>,
     salud_huellas: Arc<AtomicU8>,
 }
 
@@ -78,6 +82,7 @@ impl Estado {
             pendientes: Arc::new(Notify::new()),
             fuentes: Arc::new(Fuentes::default()),
             leyendo_whatsapp: Arc::new(AtomicI64::new(0)),
+            turno_de_fuente: Arc::new(Mutex::new(None)),
             salud_huellas: Arc::new(AtomicU8::new(SIN_PROBAR)),
         }
     }

@@ -439,7 +439,7 @@ personal-memory/
 - Todo queda en la Mac. El servicio escucha solo localmente y pide clave; la base es un archivo que solo puede leer su dueño.
 - El servicio usa internet para bajar el modelo de huellas, al instalar, y, solo si se encendió Slack como fuente (4.11), para pedirle a Slack los mensajes del propio usuario: de ahí entra texto suyo y no sale nada de la memoria. Sin Slack corre sin conexión.
 - Lo único que sale es lo que ve el agente de mantenimiento al usar Claude: el código y el ejemplo del reporte, que puede incluir partes de notas.
-- No se guarda ninguna llave de Claude: el agente usa la sesión de la conversación donde corre. Tampoco las de Slack: quedan en el llavero de macOS, y el servicio las pide cada vez que lee.
+- No se guarda ninguna llave de Claude: el agente usa la sesión de la conversación donde corre. Tampoco las de Slack: quedan en el llavero de macOS, y el servicio las pide cada vez que lee; y un espacio que se lee por la conexión de Claude no tiene ninguna.
 - Filtro de secretos antes de guardar notas y fragmentos.
 - Ningún agente borra datos: solo se descartan.
 
@@ -498,6 +498,19 @@ Slack es donde se escribe por trabajo, y ahí el tono es otro que en WhatsApp. E
 - **Comprobado con dos espacios reales** (17/11/2026), sobre una copia de la base: la primera lectura trajo unos diez mil mensajes en cinco minutos, y nueve de cada diez quedaron como propios después del filtro. En lo guardado no quedó ningún resto del formato de Slack, todos los mensajes directos quedaron con el nombre de la persona, y los emojis sin pasar aparecen en dos de cada mil mensajes. Una segunda lectura tardó dos segundos y no trajo nada. El llavero entregó las llaves sin mostrar ningún cartel.
 - **Lo que se pierde, a sabiendas:** los emojis que no están entre los más comunes quedan con su nombre (`:nombre:`) y no se cuentan como emojis; lo que el usuario editó después de mandarlo no se vuelve a leer; y un mensaje que mandó una integración en su nombre no se distingue de uno escrito por él.
 
+#### Cuarta parte: Slack por la conexión de Claude, hecha en la 0.10 (17/11/2026)
+
+Pedirle a quien usa la memoria que cree una app de Slack y guarde su llave va contra una decisión de siempre: nada de sacar y pegar llaves. Y muchas veces el espacio ya está conectado a Claude. Para ese caso, en `MEMORIA_SLACK` va `nombre=conexion` y no hace falta ninguna llave.
+
+- **Quién lee: el mod, de mensajero.** El servicio no puede usar una conexión de Claude: vive adentro de Claude. Un mod sí: `$.mcp.call` llama a las herramientas de cualquier conexión de la conversación, con las credenciales de Claude y sin pasar por el modelo. El mod de la memoria (`mod/hooks/fuentes.ts`) le pregunta al servicio qué pedir, se lo pide a Slack por la conexión y le entrega lo que contestó, tal cual. No gasta del plan del usuario: nada de esto pasa por Claude ni se ve en el chat.
+- **Todo lo demás lo decide el servicio** (`estilo/conexion.rs`): cuándo toca (el mismo ritmo que las otras fuentes, con su cuenta aparte por espacio: `juntada:conexion:<espacio>`), quién lee (una conversación por vez; el turno se suelta solo a los tres minutos sin entregas, y otra sigue desde donde quedó), qué es del usuario, a quién le escribía y hasta dónde se llegó. Usa el mismo filtro y deja los mensajes igual que la lectura con llave.
+- **Por dónde hablan.** Por la herramienta con que el mod ya pregunta por las mejoras (`memoria_mejora_estado`), con un dato más (`fuente`): una conversación que estaba abierta cuando se actualizó el servicio no conoce sus herramientas nuevas, pero esa sí. Con `fuente` la respuesta trae solo eso, y las mejoras no se tocan.
+- **Qué se le pide a la conexión.** Primero el perfil, una vez, para saber el identificador del usuario en ese espacio (pedir «mis mensajes» a secas no sirve: la conexión no lo entiende y devuelve los de otros). Después la búsqueda de sus mensajes, del más viejo al más nuevo, de a veinte (el tope de la conexión), desde el segundo del último que se vio, siguiendo el cursor que da cada página.
+- **El mod no decide ni mira.** Sabe pedirle a esa conexión solo dos cosas, las dos de lectura (la búsqueda y el perfil), aunque la misma conexión permita mandar mensajes. Los datos que vienen del servicio y van al pedido (el usuario, el momento, el cursor) tienen que tener la forma justa; si no, la vuelta se corta sin pedir nada.
+- **Lo que contesta la conexión es texto para Claude**, no un formato que alguien prometa mantener. El servicio lo lee con cuidado (los datos de cada mensaje se buscan antes de su texto, nunca adentro) y, si una página trae resultados y no entiende ninguno, la lectura falla y queda avisado, sin guardar nada.
+- **Comprobado con un espacio real** (17/11/2026), desde una conversación: la búsqueda trae el texto, el momento, el canal y, en mensajes directos y grupos, los nombres de los participantes; sin resultados contesta «No results found».
+- **Límites, a sabiendas:** lee solo mientras hay una conversación de Claude abierta que tenga la conexión; la primera lectura de un espacio grande lleva un buen rato (veinte mensajes cada dos o tres segundos); y lo que Claude mandó en nombre del usuario por esa misma conexión figura como suyo y no se distingue, salvo las notas que le deja en su propio chat, que no se leen.
+
 #### Lo que falta (propuesta, sin acordar)
 
 - **Se elige al instalar:** el instalador pregunta qué fuentes conectar, una por una, y solo lee las que se aceptan. Queda anotado en la configuración y se cambia corriendo el instalador de nuevo.
@@ -505,7 +518,7 @@ Slack es donde se escribe por trabajo, y ahí el tono es otro que en WhatsApp. E
   - Chats con Claude: hecho.
   - WhatsApp: hecho (ver arriba).
   - Slack: hecho (ver arriba).
-  - Mails enviados (sugerencia): es la mejor fuente para aprender cómo escribe los mails.
+  - Mails enviados (sugerencia): es la mejor fuente para aprender cómo escribe los mails. Si el correo está conectado a Claude, puede ir por el mismo camino que Slack por conexión: el mod de mensajero.
 - **Qué se guarda:**
   - Los mensajes propios, con de dónde salieron (lugar, conversación, a quién, idioma, fecha) y su huella. Pasan por el filtro de secretos.
   - Un perfil por lugar e idioma, con dos partes: los números que calcula el programa (largo, signos, mayúsculas, acentos, emojis, saludos y despedidas, muletillas, mezcla de idiomas) y una descripción corta que escribe el modelo local de noche.

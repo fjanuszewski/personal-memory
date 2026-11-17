@@ -24,6 +24,7 @@ use crate::buscar::{self, Clase, Consulta};
 use crate::error::{Error, Resultado, uso};
 use crate::estado::Estado;
 use crate::estilo;
+use crate::estilo::conexion::PasoDeFuente;
 use crate::grupos::{self, Grupo, Registro};
 use crate::huellas::Uso;
 use crate::mejoras::{self, EstadoMejora, Fase, Mejora, Paso, PorLanzar, Registrada, Reporte};
@@ -207,6 +208,10 @@ pub struct PedidoEstado {
     /// una mejora que esa conversación está por lanzar. Contesta apenas está lista, o enseguida si no hay ninguna.
     #[serde(default)]
     pub esperar_ms: Option<u64>,
+    /// Con `sesion`: lo que el mod trae de una fuente que se lee por una conexión de Claude (hoy, Slack).
+    /// Con esto la respuesta dice solo qué pedirle ahora a esa conexión. No es para Claude.
+    #[serde(default)]
+    pub fuente: Option<PasoDeFuente>,
 }
 
 /// Lo que el mod anota del agente de una mejora. No es para Claude.
@@ -537,6 +542,13 @@ fn aviso_de(m: &Mejora) -> String {
 
 pub async fn mejora_estado(e: &Estado, p: &PedidoEstado) -> Resultado<String> {
     if let Some(sesion) = limpio(p.sesion.as_deref()) {
+        // Para el mod, cuando hace de mensajero de una fuente: recibe lo que
+        // trae y le dice qué pedirle ahora a la conexión de Claude. Va aparte
+        // de las mejoras, que no se tocan con este pedido.
+        if let Some(paso) = &p.fuente {
+            let pedir = estilo::conexion::atender(e, sesion, paso).await?;
+            return Ok(json!({ "fuente": pedir }).to_string());
+        }
         // Para el mod: primero el paso de su agente, si trae uno, y después,
         // en JSON, lo que sigue andando y lo que hay que avisar.
         if let Some(problema) = limpio(p.problema.as_deref()) {

@@ -47,6 +47,8 @@
 # donde está su llave de solo lectura (la llave nunca va acá; ver el README):
 #   MEMORIA_FUENTES=whatsapp,slack MEMORIA_SLACK="acme=slack-acme" instalacion/instalar.sh
 #   MEMORIA_FUENTES=slack MEMORIA_SLACK="acme=slack-acme;globex=slack-globex" MEMORIA_SLACK_SIN="random" instalacion/instalar.sh
+# Un espacio que ya está conectado a Claude no necesita llave: va «conexion».
+#   MEMORIA_FUENTES=slack MEMORIA_SLACK="acme=slack-acme;globex=conexion" instalacion/instalar.sh
 #
 # Para elegir cómo se calculan las huellas (se recuerda para la próxima vez):
 #   MEMORIA_MODELO_HUELLAS=e5-small instalacion/instalar.sh   # otro modelo interno

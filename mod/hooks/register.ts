@@ -23,6 +23,11 @@
 // llave), le aprueba solo lo que puede hacer y le niega todo lo demás, sin
 // que la app le pregunte nada al usuario, y avisa cuando termina.
 //
+// Y hace de mensajero de las fuentes que se leen por una conexión de Claude
+// (docs/diseno.md, 4.11): cada tanto le pregunta al servicio si hay algo para
+// traer de Slack por la conexión que el usuario ya tiene, se lo pide a esa
+// conexión y le entrega lo que contestó. No pasa por Claude: no gasta nada.
+//
 // Una regla que no se puede romper: al agente se lo lanza siempre desde
 // adentro de un gancho que está atendiendo algo de la conversación (la
 // llamada que acepta la mejora, el fin de un turno, un mensaje). Los ganchos
@@ -46,6 +51,8 @@ import {
 import type { Encargo } from './agente'
 import { aSesionApp, fueSinConexion, motivoDe, motivoDelPedido, textoDe, textoSuelto } from './datos'
 import type { SesionApp } from './datos'
+import { busqueda, BUSCAR, CONEXION_DE_SLACK, conexionDeSlack, leerPedido, PERFIL } from './fuentes'
+import type { PedidoDeFuente } from './fuentes'
 import { grupoDelResumen, provisorio } from './grupos'
 import { leerEstado, retomar } from './mejoras'
 import type { EstadoMejoras } from './mejoras'
@@ -72,6 +79,14 @@ const FRENO = 'TaskStop'
 // Cuánto se le da al guardián para armar la copia cuando se espera adentro de un gancho.
 const ESPERA_COPIA_MS = 12_000
 const SIN_RESUMEN = 'El agente terminó, pero no quedó registrado su resumen.'
+// Cada cuánto se le pregunta al servicio si hay algo para traer por una
+// conexión de Claude, y cuánto después de registrar la conversación va la primera.
+const CADA_FUENTES_MS = 10 * 60_000
+const PRIMERA_FUENTES_MS = 45_000
+// Cuántos pedidos seguidos se le hacen a la conexión, como mucho, en una vuelta.
+const PEDIDOS_POR_VUELTA = 2_500
+// Lo más largo que se le cuenta al servicio de un error de la conexión.
+const LARGO_DEL_ERROR = 200
 
 // Cambiar la etiqueta si cambian los campos (o si lo guardado por una versión
 // anterior ya no sirve): descarta lo que sobrevive a la recarga.
@@ -733,6 +748,89 @@ function dejarDeVigilar(): void {
   vigia = undefined
 }
 
+// ---------- fuentes por una conexión de Claude ----------
+
+let relojDeFuentes: Timer | undefined
+let trayendoFuentes = false
+// Lo último que pasó al traer fuentes: se ve con /memoria.
+let estadoDeFuentes = ''
+
+// Le pide a la conexión lo que el servicio pidió. Lo que contesta va tal cual
+// al servicio; si no contesta, va el motivo.
+async function cumplir(
+  $: EngineInterface,
+  servidor: string,
+  pedido: PedidoDeFuente,
+): Promise<{ perfil: string } | { pagina: string } | { falla: string }> {
+  try {
+    const r =
+      pedido.pedir === 'perfil'
+        ? await $.mcp.call(servidor, PERFIL, { response_format: 'detailed' })
+        : await $.mcp.call(servidor, BUSCAR, busqueda(pedido))
+    const texto = textoDe(r)
+    if (r.isError || !texto.trim()) {
+      const dicho = texto.trim().slice(0, LARGO_DEL_ERROR)
+
+      return { falla: `La conexión de Slack de Claude contestó con un error: ${dicho || 'no dijo cuál'}` }
+    }
+
+    return pedido.pedir === 'perfil' ? { perfil: texto } : { pagina: texto }
+  } catch (err) {
+    return { falla: `No pude pedirle nada a la conexión de Slack de Claude: ${motivoDe(err).slice(0, LARGO_DEL_ERROR)}` }
+  }
+}
+
+// Una vuelta: mientras el servicio pida algo, se lo trae. Si esta
+// conversación no tiene la conexión de Slack, no hay nada que hacer; si el
+// servicio no tiene nada para leer así, contesta que no y termina enseguida.
+async function traerFuentes($: EngineInterface): Promise<void> {
+  if (trayendoFuentes) return
+  trayendoFuentes = true
+  try {
+    const c = await read($, contexto)
+    if (!c || !c.sesion || c.resumen === null) return
+    const servidor = conexionDeSlack(await $.tool.list())
+    if (servidor === null) {
+      estadoDeFuentes = ''
+
+      return
+    }
+    let entrega: Record<string, unknown> = {}
+    for (let pedidos = 0; pedidos < PEDIDOS_POR_VUELTA; pedidos += 1) {
+      const pedido = leerPedido(
+        await pedirMemoria($, 'memoria_mejora_estado', {
+          sesion: c.sesion,
+          fuente: { conexiones: [CONEXION_DE_SLACK], ...entrega },
+        }),
+      )
+      if (pedido === null) {
+        if (pedidos > 0) estadoDeFuentes = 'Slack por la conexión de Claude: ya le llevé a la memoria lo que pidió.'
+
+        return
+      }
+      estadoDeFuentes = `Slack por la conexión de Claude: le estoy llevando a la memoria lo de «${pedido.espacio}».`
+      entrega = { espacio: pedido.espacio, ...(await cumplir($, servidor, pedido)) }
+      if (pedido.pausaMs > 0) await dormir($, pedido.pausaMs)
+    }
+  } catch (err) {
+    // La memoria no respondió: se prueba de nuevo en la próxima vuelta.
+    estadoDeFuentes = `Slack por la conexión de Claude: no pude hablar con la memoria (${motivoDe(err)}).`
+  } finally {
+    trayendoFuentes = false
+  }
+}
+
+// Con la conversación registrada: una primera vuelta al rato, y después cada tanto.
+function vigilarFuentes($: EngineInterface): void {
+  if (relojDeFuentes !== undefined) return
+  $.clock.after(PRIMERA_FUENTES_MS, () => {
+    void traerFuentes($)
+  })
+  relojDeFuentes = $.clock.every(CADA_FUENTES_MS, () => {
+    void traerFuentes($)
+  })
+}
+
 // Una sola preparación a la vez: las instrucciones y los mensajes esperan a esta.
 function lanzar($: EngineInterface, intento = 0, app?: SesionApp | null): Promise<boolean> {
   if (enCurso) return enCurso
@@ -741,8 +839,12 @@ function lanzar($: EngineInterface, intento = 0, app?: SesionApp | null): Promis
     .then(ok => {
       if (!ok) reintentar($, intento)
       // Con la conversación registrada: avisos que hayan quedado pendientes
-      // (de esta conversación, o viejos de otra del mismo grupo).
-      else void revisarMejoras($)
+      // (de esta conversación, o viejos de otra del mismo grupo), y lo que
+      // haya para traer por una conexión de Claude.
+      else {
+        void revisarMejoras($)
+        vigilarFuentes($)
+      }
 
       return ok
     })
@@ -809,6 +911,7 @@ function estado(c: Contexto | null, e: Entrega, a: Agentes): string {
     if (!agente.anulado && !agente.aviso) lineas.push(`Un agente trabaja de fondo en la mejora ${agente.mejora}.`)
   }
   if (problema !== '') lineas.push(problema)
+  if (estadoDeFuentes !== '') lineas.push(estadoDeFuentes)
   if (c.resumen !== null) lineas.push('', c.resumen)
 
   return lineas.join('\n')

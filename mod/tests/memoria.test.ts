@@ -3,6 +3,7 @@ import type { On, PromptComposeInput, PromptComposeResult, PromptSubmitInput } f
 
 import { aEncargo, enRegla, normalizar, revisar } from '../hooks/agente'
 import { motivoDelPedido } from '../hooks/datos'
+import { busqueda, BUSCAR, conexionDeSlack, leerPedido, PERFIL } from '../hooks/fuentes'
 import { grupoDelResumen, provisorio } from '../hooks/grupos'
 import type { AgenteLanzado } from '../types'
 
@@ -68,7 +69,25 @@ type Mundo = {
    * mod lo escuche, como cuando se lo lanza desde un reloj.
    */
   alArrancar?: (agentId: string) => Promise<unknown>
+  /** Lo que hay para traer por la conexión de Slack de Claude. Sin esto, la conversación no la tiene. */
+  fuentes?: Fuentes
 }
+
+type Fuentes = {
+  /** Lo que el servicio le va pidiendo al mod, en orden: cada pregunta gasta uno. Sin más, no pide nada. */
+  pedidos: Record<string, unknown>[]
+  /** Si la conexión de Slack contesta con un error. */
+  falla?: boolean
+}
+
+// Como figura en Claude la conexión de Slack: con un nombre que elige la app.
+const CONECTOR = 'conector-7f3a'
+const PERFIL_DE_ANA = JSON.stringify({ result: 'User ID: U0ANA\nUsername: ana\nReal Name: Ana Ruiz\n' })
+const PAGINA_DE_ANA = JSON.stringify({
+  results:
+    '# Search Results for: \n\n## Messages (1 results)\n### Result 1 of 1\nChannel: #equipo-acme (ID: C0EQUIPO)\nFrom: Ana Ruiz <ana@example.com> (ID: U0ANA) \nMessage_ts: 1794312000.000100\nText: \nalguien pudo revisar lo de ayer?\n\n---\n\n',
+  pagination_info: '',
+})
 
 type Mejoras = {
   enCurso: number[]
@@ -108,6 +127,10 @@ type Visto = {
   consultados: string[]
   /** Los agentes que el mod detuvo. */
   frenados: string[]
+  /** Lo que el mod le pidió a la conexión de Slack de Claude. */
+  aSlack: { tool: string; args: Record<string, unknown> }[]
+  /** Lo que el mod le llevó al servicio al preguntarle por las fuentes. */
+  entregas: Record<string, unknown>[]
 }
 
 // Un mensaje con este texto no entra (como si otro gancho lo rechazara).
@@ -126,6 +149,8 @@ function mundo(on: On, o: Mundo = {}): Visto {
     corridas: [],
     consultados: [],
     frenados: [],
+    aSlack: [],
+    entregas: [],
   }
   let fallas = o.fallasMemoria ?? 0
   let cortes = o.sinConexionAlRegistrar ?? 0
@@ -212,6 +237,18 @@ function mundo(on: On, o: Mundo = {}): Visto {
 
     return { text: e.text, context: e.context }
   })
+  // Las herramientas de la conversación: las de la memoria y, si la tiene, las de Slack.
+  on('tool.list', () => ({
+    value: [
+      { name: 'mcp__memoria__memoria_buscar', description: 'Busca en la memoria.', mcp: true },
+      ...(o.fuentes
+        ? [
+            { name: `mcp__${CONECTOR}__slack_send_message`, description: 'Manda un mensaje.', mcp: true },
+            { name: `mcp__${CONECTOR}__${BUSCAR}`, description: 'Busca mensajes.', mcp: true, isDeferred: true },
+          ]
+        : []),
+    ] as never,
+  }))
   const conexion = () => (o.conexion ? o.conexion() : 'bien')
   // Lo que contesta Claude cuando un mod le pregunta por una conexión.
   on('mcp.connect', (_, e) => {
@@ -241,6 +278,19 @@ function mundo(on: On, o: Mundo = {}): Visto {
       cortes -= 1
 
       return sinConexion()
+    }
+    // La conexión de Slack de Claude: contesta lo que le pidan, sin mirar quién.
+    if (llamada.server === CONECTOR) {
+      visto.aSlack.push({ tool: llamada.tool, args: llamada.args })
+      if (o.fuentes?.falla) return texto('rate_limited', true)
+
+      return texto(llamada.tool === PERFIL ? PERFIL_DE_ANA : PAGINA_DE_ANA)
+    }
+    // El mod haciendo de mensajero: el servicio recibe lo que trae y le dice qué pedir.
+    if (llamada.server === 'memoria' && llamada.tool === 'memoria_mejora_estado' && llamada.args.fuente !== undefined) {
+      visto.entregas.push(llamada.args.fuente as Record<string, unknown>)
+
+      return texto(JSON.stringify({ fuente: o.fuentes?.pedidos.shift() ?? null }))
     }
     visto.llamadas.push(llamada)
     if (llamada.server === 'ccd_session_mgmt') {
@@ -1344,3 +1394,140 @@ test('las reglas del agente, sin la app', () => {
   expect(aEncargo({ id: 7 })).toBe(null)
 })
 
+
+// ---------- fuentes por una conexión de Claude ----------
+
+const BUSCAR_DE_ANA = { espacio: 'acme', pedir: 'buscar', usuario: 'U0ANA', despues: null, cursor: null, pausa_ms: 1_500 }
+
+test('le lleva a la memoria lo que pide de Slack, por la conexión de Claude y sin pasar por Claude', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  const visto = mundo(on, {
+    fuentes: {
+      pedidos: [
+        { espacio: 'acme', pedir: 'perfil' },
+        BUSCAR_DE_ANA,
+        { ...BUSCAR_DE_ANA, despues: '1794312000', cursor: 'Q1VSU09S' },
+      ],
+    },
+  })
+  await $.session.start(INICIO)
+  await clock.settle()
+  expect(visto.entregas).toEqual([])
+  // Un rato después de registrar la conversación va la primera vuelta.
+  await clock.advance(45_000)
+  await clock.settle()
+  for (let i = 0; i < 4; i += 1) {
+    await clock.advance(1_500)
+    await clock.settle()
+  }
+  // Le pidió a la conexión lo que el servicio fue pidiendo, y nada más: el
+  // perfil, y los mensajes de ese usuario del más viejo al más nuevo.
+  expect(visto.aSlack.map(l => l.tool)).toEqual([PERFIL, BUSCAR, BUSCAR])
+  expect(visto.aSlack[0]?.args).toEqual({ response_format: 'detailed' })
+  expect(visto.aSlack[1]?.args).toEqual({
+    filters: 'from:<@U0ANA>',
+    natural_language_query: '',
+    sort: 'timestamp',
+    sort_dir: 'asc',
+    limit: 20,
+    include_context: false,
+    response_format: 'detailed',
+  })
+  expect(visto.aSlack[2]?.args).toMatchObject({ filters: 'from:<@U0ANA>', after: '1794312000', cursor: 'Q1VSU09S' })
+  // Y al servicio le llevó lo que la conexión contestó, tal cual.
+  expect(visto.entregas).toEqual([
+    { conexiones: ['slack'] },
+    { conexiones: ['slack'], espacio: 'acme', perfil: PERFIL_DE_ANA },
+    { conexiones: ['slack'], espacio: 'acme', pagina: PAGINA_DE_ANA },
+    { conexiones: ['slack'], espacio: 'acme', pagina: PAGINA_DE_ANA },
+  ])
+  // Nada de esto pasa por el chat ni por Claude.
+  expect(visto.avisos).toEqual([])
+  expect(visto.retomados).toEqual([])
+  // Cada tanto vuelve a preguntar; si no hay nada, no le pide nada a la conexión.
+  await clock.advance(10 * 60_000)
+  await clock.settle()
+  expect(visto.entregas).toHaveLength(5)
+  expect(visto.aSlack).toHaveLength(3)
+})
+
+test('sin la conexión de Slack en la conversación, no pregunta por las fuentes', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  const visto = mundo(on)
+  await $.session.start(INICIO)
+  await clock.settle()
+  await clock.advance(11 * 60_000)
+  await clock.settle()
+  expect(visto.entregas).toEqual([])
+  expect(visto.aSlack).toEqual([])
+})
+
+test('si la conexión de Slack no contesta, se lo dice a la memoria y no insiste', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  const visto = mundo(on, { fuentes: { pedidos: [BUSCAR_DE_ANA], falla: true } })
+  await $.session.start(INICIO)
+  await clock.settle()
+  await clock.advance(45_000)
+  await clock.settle()
+  await clock.advance(1_500)
+  await clock.settle()
+  expect(visto.aSlack).toHaveLength(1)
+  expect(visto.entregas).toEqual([
+    { conexiones: ['slack'] },
+    {
+      conexiones: ['slack'],
+      espacio: 'acme',
+      falla: 'La conexión de Slack de Claude contestó con un error: rate_limited',
+    },
+  ])
+})
+
+test('lo que diga el servicio no le hace pedir a la conexión otra cosa que leer', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  const visto = mundo(on, {
+    fuentes: { pedidos: [{ espacio: 'acme', pedir: 'mandar', usuario: 'U0ANA', texto: 'hola a todos' }, BUSCAR_DE_ANA] },
+  })
+  await $.session.start(INICIO)
+  await clock.settle()
+  await clock.advance(45_000)
+  await clock.settle()
+  await clock.advance(5_000)
+  await clock.settle()
+  // Un pedido que no conoce corta la vuelta: no le pide nada a la conexión.
+  expect(visto.entregas).toEqual([{ conexiones: ['slack'] }])
+  expect(visto.aSlack).toEqual([])
+})
+
+test('reconoce la conexión de Slack y arma solo pedidos con la forma esperada', () => {
+  expect(conexionDeSlack([{ name: 'Read' }, { name: `mcp__abc-123__${BUSCAR}` }])).toBe('abc-123')
+  // Un conector local de Slack, con otras herramientas, no es la conexión de Claude.
+  expect(conexionDeSlack([{ name: 'mcp__slack-acme__search' }, { name: 'mcp__memoria__memoria_buscar' }])).toBeNull()
+
+  const pedir = (fuente: unknown) => leerPedido(JSON.stringify({ fuente }))
+  expect(pedir(null)).toBeNull()
+  expect(leerPedido('no es json')).toBeNull()
+  expect(leerPedido(JSON.stringify({ en_curso: [], avisos: [] }))).toBeNull()
+  expect(pedir({ espacio: 'acme', pedir: 'perfil' })).toEqual({ espacio: 'acme', pedir: 'perfil', pausaMs: 1_500 })
+  const buscar = pedir({ ...BUSCAR_DE_ANA, despues: '1794312000', cursor: 'Q1VSU09S', pausa_ms: 999_999 })
+  expect(buscar).toEqual({
+    espacio: 'acme',
+    pedir: 'buscar',
+    usuario: 'U0ANA',
+    despues: '1794312000',
+    cursor: 'Q1VSU09S',
+    pausaMs: 10_000,
+  })
+  // Lo que va derecho al pedido tiene que tener la forma justa: nada de filtros de más.
+  for (const malo of [
+    { ...BUSCAR_DE_ANA, usuario: 'U0ANA> in:<#C0GENERAL' },
+    { ...BUSCAR_DE_ANA, usuario: 'ana' },
+    { ...BUSCAR_DE_ANA, despues: 'ayer' },
+    { ...BUSCAR_DE_ANA, cursor: 'con espacios' },
+    { ...BUSCAR_DE_ANA, espacio: '' },
+    { ...BUSCAR_DE_ANA, pedir: 'borrar' },
+  ]) {
+    expect(pedir(malo)).toBeNull()
+  }
+  if (buscar?.pedir !== 'buscar') throw new Error('tenía que ser una búsqueda')
+  expect(busqueda(buscar)).toMatchObject({ filters: 'from:<@U0ANA>', sort_dir: 'asc', limit: 20, include_context: false })
+})

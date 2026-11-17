@@ -51,7 +51,7 @@ const LIMITE_DEL_LLAVERO: Duration = Duration::from_secs(120);
 /// Con qué cuenta están guardadas las llaves en el llavero.
 const CUENTA_DEL_LLAVERO: &str = "token";
 /// El ayudante de Slack: lo que se le escribe no es para nadie.
-const SLACKBOT: &str = "USLACKBOT";
+pub(super) const SLACKBOT: &str = "USLACKBOT";
 const MICROS: i64 = 1_000_000;
 
 /// Lo que salió de leer Slack.
@@ -93,6 +93,7 @@ impl std::fmt::Debug for Secreto {
 async fn llave_de(espacio: &Espacio) -> anyhow::Result<Secreto> {
     let entrada = match &espacio.llave {
         Llave::Fija(llave) => return Ok(Secreto(llave.clone())),
+        Llave::Conexion => bail!("este espacio no tiene llave: se lee por la conexión de Slack de Claude"),
         Llave::Llavero(entrada) => entrada,
     };
     let mut orden = tokio::process::Command::new("/usr/bin/security");
@@ -319,7 +320,7 @@ impl Persona {
 
 /// El momento de un mensaje, que Slack da en segundos con seis decimales
 /// («1763310000.000200»), en millonésimas de segundo.
-fn micros_de(ts: &str) -> Option<i64> {
+pub(super) fn micros_de(ts: &str) -> Option<i64> {
     let (segundos, resto) = ts.trim().split_once('.').unwrap_or((ts.trim(), ""));
     if segundos.is_empty() || !segundos.chars().chain(resto.chars()).all(|c| c.is_ascii_digit()) {
         return None;
@@ -411,7 +412,7 @@ fn marca_a_texto(marca: &Captures<'_>) -> String {
 /// Un mensaje como lo guarda Slack, pasado a como lo escribió el usuario: sin
 /// el código pegado ni lo que citó de otro, con las menciones, los canales y
 /// los enlaces como texto, y con los emojis más comunes.
-fn texto_llano(texto: &str) -> String {
+pub(super) fn texto_llano(texto: &str) -> String {
     let sin_codigo = CODIGO.replace_all(texto, "\n");
     let mut propios: Vec<&str> = Vec::new();
     for renglon in sin_codigo.lines() {
@@ -614,10 +615,11 @@ async fn juntar_espacio(
 /// Lee lo que el usuario (`nombre`) escribió en cada espacio de Slack desde
 /// la última vez y, con `anotar`, lo guarda en `pool`. Sin `anotar` solo
 /// pregunta cuántos mensajes suyos hay. Un espacio que no se puede leer no
-/// frena a los demás.
+/// frena a los demás. Los espacios que se leen por la conexión de Claude no
+/// pasan por acá: los trae el mod (ver [`super::conexion`]).
 pub async fn juntar(pool: &SqlitePool, cfg: &Slack, nombre: &str, anotar: bool) -> Lectura {
     let mut lectura = Lectura::default();
-    for espacio in &cfg.espacios {
+    for espacio in cfg.espacios.iter().filter(|espacio| espacio.llave != Llave::Conexion) {
         match juntar_espacio(pool, cfg, espacio, nombre, anotar).await {
             Ok(juntado) => {
                 lectura.espacios += 1;

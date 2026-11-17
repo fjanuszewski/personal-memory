@@ -23,9 +23,9 @@ use sqlx::SqlitePool;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{idioma, slack, whatsapp};
+use super::{conexion, idioma, slack, whatsapp};
 use crate::base;
-use crate::config::Fuentes;
+use crate::config::{Fuentes, Llave};
 use crate::error::Resultado;
 use crate::estado::Estado;
 
@@ -96,16 +96,20 @@ pub struct Juntada {
     pub resumen: String,
 }
 
-/// La última lectura de una fuente, si hubo alguna.
-pub async fn ultima(pool: &SqlitePool, fuente: Fuente) -> Resultado<Option<Juntada>> {
-    let valor: Option<String> = sqlx::query_scalar("select valor from ajustes where clave = ?1")
-        .bind(fuente.clave())
-        .fetch_optional(pool)
-        .await?;
+/// La lectura que quedó anotada con una clave de `ajustes`, si hay.
+pub(super) async fn anotada(pool: &SqlitePool, clave: &str) -> Resultado<Option<Juntada>> {
+    let valor: Option<String> =
+        sqlx::query_scalar("select valor from ajustes where clave = ?1").bind(clave).fetch_optional(pool).await?;
     Ok(valor.and_then(|v| serde_json::from_str(&v).ok()))
 }
 
-fn vencida(ultima: Option<&Juntada>, ahora: DateTime<Utc>) -> bool {
+/// La última lectura de una fuente, si hubo alguna.
+pub async fn ultima(pool: &SqlitePool, fuente: Fuente) -> Resultado<Option<Juntada>> {
+    anotada(pool, fuente.clave()).await
+}
+
+/// Si ya pasó el tiempo desde una lectura como para hacer otra.
+pub(super) fn vencida(ultima: Option<&Juntada>, ahora: DateTime<Utc>) -> bool {
     ultima.is_none_or(|j| ahora - j.cuando >= Duration::hours(if j.bien { HORAS_SI_ANDUVO } else { HORAS_SI_FALLO }))
 }
 
@@ -120,12 +124,13 @@ pub async fn toca(pool: &SqlitePool, fuentes: &Fuentes) -> Resultado<bool> {
     Ok(false)
 }
 
-async fn anotar(pool: &SqlitePool, fuente: Fuente, juntada: &Juntada) -> Resultado<()> {
+/// Deja anotada una lectura con una clave de `ajustes`.
+pub(super) async fn anotar_en(pool: &SqlitePool, clave: &str, juntada: &Juntada) -> Resultado<()> {
     sqlx::query(
         "insert into ajustes (clave, valor) values (?1, ?2)
          on conflict (clave) do update set valor = excluded.valor",
     )
-    .bind(fuente.clave())
+    .bind(clave)
     .bind(serde_json::to_string(juntada).unwrap_or_default())
     .execute(pool)
     .await?;
@@ -147,12 +152,18 @@ fn motivo(falla: &anyhow::Error) -> String {
     }
 }
 
+/// «1 espacio», «3 espacios».
+fn cuantos_espacios(n: usize) -> String {
+    if n == 1 { "1 espacio".to_owned() } else { format!("{n} espacios") }
+}
+
 /// Lo que pasó al leer Slack, dicho para el usuario. Anduvo si se pudieron
-/// leer todos los espacios; del que no, dice por qué.
-fn de_slack(lectura: &slack::Lectura, anotar: bool) -> (bool, String) {
+/// leer todos los espacios que tienen llave; del que no, dice por qué. Los
+/// `por_conexion` no los lee el servicio: se nombran para que no parezca que
+/// faltan.
+fn de_slack(lectura: &slack::Lectura, anotar: bool, por_conexion: usize) -> (bool, String) {
     let j = lectura.juntado;
-    let espacios =
-        if lectura.espacios == 1 { "1 espacio".to_owned() } else { format!("{} espacios", lectura.espacios) };
+    let espacios = cuantos_espacios(lectura.espacios);
     let mut resumen = if lectura.espacios == 0 {
         "Slack:".to_owned()
     } else if anotar {
@@ -165,6 +176,13 @@ fn de_slack(lectura: &slack::Lectura, anotar: bool) -> (bool, String) {
     };
     for falla in &lectura.fallas {
         let _ = write!(resumen, " No se pudo leer {falla}.");
+    }
+    if por_conexion > 0 {
+        let _ = write!(
+            resumen,
+            " Aparte, {} por la conexión de Slack de Claude: lo trae Claude cuando hay una conversación abierta.",
+            cuantos_espacios(por_conexion)
+        );
     }
     (lectura.fallas.is_empty(), resumen)
 }
@@ -197,7 +215,8 @@ async fn leer(pool: &SqlitePool, fuentes: &Fuentes, nombre: &str, fuente: Fuente
         }
         Fuente::Slack => {
             let Some(cfg) = &fuentes.slack else { return (true, String::new()) };
-            de_slack(&slack::juntar(pool, cfg, nombre, anotar).await, anotar)
+            let por_conexion = cfg.espacios.iter().filter(|espacio| espacio.llave == Llave::Conexion).count();
+            de_slack(&slack::juntar(pool, cfg, nombre, anotar).await, anotar, por_conexion)
         }
     }
 }
@@ -221,7 +240,7 @@ pub async fn probar(pool: &SqlitePool, fuentes: &Fuentes, nombre: &str) -> (bool
 /// qué pasó: de ahí sale cuándo le toca la próxima.
 async fn juntar_una(pool: &SqlitePool, fuentes: &Fuentes, nombre: &str, fuente: Fuente) -> Resultado<(bool, String)> {
     let (bien, resumen) = leer(pool, fuentes, nombre, fuente, true).await;
-    anotar(pool, fuente, &Juntada { cuando: base::ahora(), bien, resumen: resumen.clone() }).await?;
+    anotar_en(pool, fuente.clave(), &Juntada { cuando: base::ahora(), bien, resumen: resumen.clone() }).await?;
     Ok((bien, resumen))
 }
 
@@ -322,6 +341,17 @@ pub async fn aviso(e: &Estado) -> Resultado<Option<String>> {
             ));
         }
     }
+    // Los espacios que trae el mod por la conexión de Claude llevan su cuenta aparte.
+    let por_conexion = e.fuentes.slack.iter().flat_map(|cfg| &cfg.espacios).filter(|e| e.llave == Llave::Conexion);
+    for espacio in por_conexion {
+        if let Some(j) = anotada(&e.pool, &conexion::clave(&espacio.nombre)).await?.filter(|j| !j.bien) {
+            avisos.push(format!(
+                "Slack está encendido, pero la última lectura ({}) no anduvo. {} Decíselo al usuario.",
+                j.cuando.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                j.resumen
+            ));
+        }
+    }
     Ok((!avisos.is_empty()).then(|| avisos.join("\n")))
 }
 
@@ -375,7 +405,7 @@ mod pruebas {
         let juntado = slack::Juntado { leidos: 40, propios: 30, nuevos: 12, chats: 5 };
         let todo_bien = slack::Lectura { juntado, espacios: 2, fallas: vec![] };
         assert_eq!(
-            de_slack(&todo_bien, true),
+            de_slack(&todo_bien, true, 0),
             (
                 true,
                 "Slack: 12 mensajes nuevos (de 30 tuyos en 5 conversaciones de 2 espacios que había para leer)."
@@ -383,12 +413,12 @@ mod pruebas {
             )
         );
         assert_eq!(
-            de_slack(&todo_bien, false),
+            de_slack(&todo_bien, false, 0),
             (true, "Slack: hay 40 mensajes tuyos para leer en 2 espacios. No guardé nada.".to_owned())
         );
         // Con un espacio que no se pudo leer no anduvo, pero lo del otro queda.
         let a_medias = slack::Lectura { juntado, espacios: 1, fallas: vec!["«acme»: la llave no sirve".to_owned()] };
-        let (bien, resumen) = de_slack(&a_medias, true);
+        let (bien, resumen) = de_slack(&a_medias, true, 0);
         assert!(
             !bien && resumen.starts_with("Slack: 12 mensajes nuevos") && resumen.contains("de 1 espacio que"),
             "{resumen}"
@@ -396,6 +426,12 @@ mod pruebas {
         assert!(resumen.ends_with(" No se pudo leer «acme»: la llave no sirve."), "{resumen}");
         let nada =
             slack::Lectura { fallas: vec!["«acme»: la llave no sirve".to_owned()], ..slack::Lectura::default() };
-        assert_eq!(de_slack(&nada, true), (false, "Slack: No se pudo leer «acme»: la llave no sirve.".to_owned()));
+        assert_eq!(de_slack(&nada, true, 0), (false, "Slack: No se pudo leer «acme»: la llave no sirve.".to_owned()));
+        // Los espacios que trae Claude por su conexión se nombran aparte: el servicio no los lee.
+        let (bien, resumen) = de_slack(&slack::Lectura::default(), true, 1);
+        assert!(
+            bien && resumen.starts_with("Slack: Aparte, 1 espacio por la conexión de Slack de Claude"),
+            "{resumen}"
+        );
     }
 }

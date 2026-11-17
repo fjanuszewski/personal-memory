@@ -35,6 +35,9 @@ pub struct WhatsApp {
 pub enum Llave {
     /// Del llavero de macOS: el nombre de la entrada donde está guardada.
     Llavero(String),
+    /// No hay llave: el espacio se lee por la conexión de Slack que el
+    /// usuario tiene en Claude, y lo trae el mod de una conversación abierta.
+    Conexion,
     /// Puesta en el código. Solo para las pruebas: una llave de verdad no se
     /// escribe en ningún archivo.
     Fija(String),
@@ -45,6 +48,7 @@ impl std::fmt::Debug for Llave {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Llavero(entrada) => write!(f, "Llavero({entrada:?})"),
+            Self::Conexion => f.write_str("Conexion"),
             Self::Fija(_) => f.write_str("Fija(…)"),
         }
     }
@@ -61,8 +65,9 @@ pub struct Espacio {
 /// Slack como fuente para aprender cómo escribe el usuario.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slack {
-    /// Los espacios de trabajo (`MEMORIA_SLACK`: «nombre=entrada del
-    /// llavero», separados por punto y coma).
+    /// Los espacios de trabajo (`MEMORIA_SLACK`, separados por punto y
+    /// coma): «nombre=entrada del llavero», o «nombre=conexion» si se lee
+    /// por la conexión de Slack de Claude.
     pub espacios: Vec<Espacio>,
     /// Canales y personas que quedan afuera: los que tienen alguno de estos
     /// textos en el nombre (`MEMORIA_SLACK_SIN`, separados por punto y coma).
@@ -156,7 +161,8 @@ fn lista(texto: Option<&str>) -> Vec<String> {
 
 /// Lee `MEMORIA_SLACK`: de cada espacio de trabajo, el nombre que le pone el
 /// usuario y en qué entrada del llavero está su llave («acme=slack-acme;
-/// globex=slack-globex»).
+/// globex=slack-globex»). En vez de la entrada puede ir «conexion»: ese
+/// espacio no tiene llave y se lee por la conexión de Slack de Claude.
 fn leer_espacios(texto: Option<&str>) -> anyhow::Result<Vec<Espacio>> {
     let mut espacios: Vec<Espacio> = Vec::new();
     for parte in lista(texto) {
@@ -164,7 +170,7 @@ fn leer_espacios(texto: Option<&str>) -> anyhow::Result<Vec<Espacio>> {
             Some((nombre, entrada)) if !nombre.trim().is_empty() && !entrada.trim().is_empty() => {
                 (nombre.trim().to_owned(), entrada.trim().to_owned())
             }
-            _ => bail!("MEMORIA_SLACK: «{parte}» tiene que ser «nombre=entrada del llavero»"),
+            _ => bail!("MEMORIA_SLACK: «{parte}» tiene que ser «nombre=entrada del llavero» o «nombre=conexion»"),
         };
         if entrada.starts_with("xox") {
             bail!(
@@ -175,7 +181,11 @@ fn leer_espacios(texto: Option<&str>) -> anyhow::Result<Vec<Espacio>> {
         if espacios.iter().any(|espacio| espacio.nombre.eq_ignore_ascii_case(&nombre)) {
             bail!("MEMORIA_SLACK: el espacio «{nombre}» está dos veces");
         }
-        espacios.push(Espacio { nombre, llave: Llave::Llavero(entrada) });
+        let llave = match entrada.to_lowercase().as_str() {
+            "conexion" | "conexión" => Llave::Conexion,
+            _ => Llave::Llavero(entrada),
+        };
+        espacios.push(Espacio { nombre, llave });
     }
     if espacios.is_empty() {
         bail!(
@@ -378,6 +388,10 @@ mod pruebas {
         assert!(pegada.to_string().contains("no la llave") && !pegada.to_string().contains("xoxp"), "{pegada}");
         // Una llave nunca se muestra.
         assert_eq!(format!("{:?}", Llave::Fija("xoxp-una-llave-de-mentira".into())), "Fija(…)");
+        // Un espacio sin llave se lee por la conexión de Slack de Claude.
+        let mezcla = fuentes_con(Some("slack"), &[("MEMORIA_SLACK", "acme=slack-acme; globex = Conexión")]).unwrap();
+        let llaves: Vec<Llave> = mezcla.slack.unwrap().espacios.into_iter().map(|espacio| espacio.llave).collect();
+        assert_eq!(llaves, vec![Llave::Llavero("slack-acme".into()), Llave::Conexion]);
     }
 
     #[test]
