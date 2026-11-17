@@ -6,10 +6,11 @@ mod comun;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use comun::estado;
 use memoria::config::{Fuentes, WhatsApp};
-use memoria::estilo::fuentes;
+use memoria::estilo::fuentes::{self, Fuente};
 use memoria::estilo::whatsapp::{self, Juntado};
 use memoria::mcp::{self, PedidoEstilo};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -193,7 +194,17 @@ async fn lee_solo_lo_que_escribio_el_usuario_y_no_toca_la_base_de_whatsapp() {
 
     // La base de la aplicación quedó como estaba, y no quedó ninguna copia dando vueltas.
     de_whatsapp.close().await;
-    assert_eq!(copias_sueltas(), 0);
+    // Las otras pruebas de este archivo corren a la vez, y cada una tiene su
+    // copia mientras lee: se espera a que no quede ninguna.
+    let mut sueltas = copias_sueltas();
+    for _ in 0..100 {
+        if sueltas == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        sueltas = copias_sueltas();
+    }
+    assert_eq!(sueltas, 0);
     let ahora = std::fs::read(&archivo).unwrap();
     assert!(ahora.len() >= antes.len());
 }
@@ -311,10 +322,10 @@ async fn se_lee_cuando_toca_y_no_se_insiste_si_fallo() {
     assert!(!fuentes::toca(&pool, &e.fuentes).await.unwrap());
     let (bien, resumen) = fuentes::juntar(&pool, &e.fuentes, "Ana").await.unwrap();
     assert!(bien && resumen.starts_with("No hay ninguna fuente encendida"), "{resumen}");
-    assert_eq!(fuentes::ultima(&pool).await.unwrap(), None);
+    assert_eq!(fuentes::ultima(&pool, Fuente::WhatsApp).await.unwrap(), None);
     assert_eq!(fuentes::aviso(&e).await.unwrap(), None);
 
-    let encendidas = Fuentes { whatsapp: Some(ajustes(&archivo)) };
+    let encendidas = Fuentes { whatsapp: Some(ajustes(&archivo)), slack: None };
     e.fuentes = Arc::new(encendidas.clone());
     assert!(fuentes::toca(&pool, &encendidas).await.unwrap());
     // Probar no guarda ni cuenta como juntada.
@@ -332,10 +343,13 @@ async fn se_lee_cuando_toca_y_no_se_insiste_si_fallo() {
     assert!(bien && resumen.starts_with("WhatsApp: 0 mensajes nuevos"), "{resumen}");
 
     // Si no se puede leer, queda anotado, no se insiste enseguida y quien pregunta cómo escribe se entera.
-    let rota = Fuentes { whatsapp: Some(WhatsApp { base: archivo.with_file_name("no-existe.sqlite"), sin: vec![] }) };
+    let rota = Fuentes {
+        whatsapp: Some(WhatsApp { base: archivo.with_file_name("no-existe.sqlite"), sin: vec![] }),
+        slack: None,
+    };
     let (bien, resumen) = fuentes::juntar(&pool, &rota, "Ana").await.unwrap();
     assert!(!bien && resumen.starts_with("WhatsApp: no se pudo leer. no pude leer la base de WhatsApp"), "{resumen}");
-    let ultima = fuentes::ultima(&pool).await.unwrap().unwrap();
+    let ultima = fuentes::ultima(&pool, Fuente::WhatsApp).await.unwrap().unwrap();
     assert!(!ultima.bien && ultima.resumen == resumen);
     assert!(!fuentes::toca(&pool, &rota).await.unwrap());
     let r = mcp::estilo(&e, &PedidoEstilo { lugar: Some("whatsapp".into()), ..PedidoEstilo::default() }).await.unwrap();
@@ -343,11 +357,11 @@ async fn se_lee_cuando_toca_y_no_se_insiste_si_fallo() {
 
     // Mientras el servicio espera a que el usuario le conteste a macOS, también.
     let hace_cinco_minutos = chrono::Utc::now().timestamp() - 5 * 60;
-    e.leyendo_fuentes.store(hace_cinco_minutos, std::sync::atomic::Ordering::Relaxed);
+    e.leyendo_whatsapp.store(hace_cinco_minutos, std::sync::atomic::Ordering::Relaxed);
     let aviso = fuentes::aviso(&e).await.unwrap().unwrap();
     assert!(aviso.contains("la lectura espera hace 5 min") && aviso.contains("«Permitir»"), "{aviso}");
     // Recién empezada no se avisa nada: lo normal es que termine en segundos.
-    e.leyendo_fuentes.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
+    e.leyendo_whatsapp.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
     assert_eq!(fuentes::aviso(&e).await.unwrap(), None);
     de_whatsapp.close().await;
 }

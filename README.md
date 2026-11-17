@@ -83,7 +83,7 @@ Cada mejora parte del commit de git del que salió lo instalado (`~/.memoria/ins
 
 Para que un mensaje o un correo redactado por Claude suene a vos y no a Claude. La memoria junta **solo lo que escribiste vos**, mide cómo lo escribís y se lo cuenta a Claude cuando tiene que redactar algo en tu nombre. No hay ningún modelo de por medio y nada sale de tu máquina: son cuentas sobre tus propios mensajes, guardados en la misma base.
 
-**De dónde aprende.** De tus conversaciones con Claude (las que el servicio ya lee): las repasa solo, de fondo, y la primera vez recorre también lo anterior. Y, si la encendés, de WhatsApp. Las fuentes que no son Claude son siempre optativas: cada una se enciende aparte y, apagada, no se lee.
+**De dónde aprende.** De tus conversaciones con Claude (las que el servicio ya lee): las repasa solo, de fondo, y la primera vez recorre también lo anterior. Y, si las encendés, de WhatsApp y de Slack. Las fuentes que no son Claude son siempre optativas: cada una se enciende aparte y, apagada, no se lee.
 
 **WhatsApp (optativa).** A Claude le escribís rápido; para que un mensaje suene a vos tiene que aprender de tus mensajes. Se enciende al instalar:
 
@@ -100,6 +100,22 @@ MEMORIA_FUENTES=whatsapp MEMORIA_WHATSAPP_SIN="Familia;Los del colegio" instalac
 - **Cómo le escribís a cada uno.** Si Claude dice a quién le vas a escribir y ya le mandaste 30 mensajes o más, mide cómo le escribís a esa persona o a ese grupo, que no siempre es como le escribís al resto. Los saludos se cuentan donde empieza una charla (después de 6 horas sin escribirle), no en cada mensaje.
 - Lo que le mandaste a alguien se muestra como ejemplo **solo cuando Claude dice a quién le vas a escribir** y ya le habías escrito: nunca aparecen mensajes de un chat en otro. El nombre tiene que ser el del chat, entero o con palabras enteras («Ana» es «Ana Trabajo», no «Mariana»); si coincide con más de un chat, no elige: los nombra y no muestra mensajes de ninguno.
 - Para ver qué entraría sin guardar nada: `~/.memoria/bin/memoria juntar --probar`. Para leer ahora, sin esperar al servicio: `~/.memoria/bin/memoria juntar`. Para apagarla: `MEMORIA_FUENTES=ninguna instalacion/instalar.sh`.
+
+**Slack (optativa).** Donde escribís por trabajo, que no es como escribís en WhatsApp. La memoria le pide a Slack tus propios mensajes de cada espacio de trabajo, con una llave de solo lectura que vive en el llavero de tu Mac:
+
+```bash
+# la llave de cada espacio va al llavero, con el nombre de entrada que quieras (la pide sin mostrarla):
+security add-generic-password -U -s slack-acme -a token -w
+MEMORIA_FUENTES=whatsapp,slack MEMORIA_SLACK="acme=slack-acme" instalacion/instalar.sh
+# con dos espacios, y dejando afuera los canales y las personas que tengan estos textos en el nombre:
+MEMORIA_FUENTES=slack MEMORIA_SLACK="acme=slack-acme;globex=slack-globex" MEMORIA_SLACK_SIN="random;Luis" instalacion/instalar.sh
+```
+
+- **La llave.** En cada espacio hace falta una app de Slack tuya, de solo lectura, con dos permisos de usuario: `search:read` (buscar tus mensajes) y `users:read` (saber cómo se llama la persona de un mensaje directo). Se crea en api.slack.com/apps, se instala en el espacio y da una llave de usuario, que empieza con `xoxp-`. En `MEMORIA_SLACK` va el nombre que le ponés al espacio y el de la entrada del llavero donde guardaste la llave, nunca la llave: si pegás una ahí, la memoria no arranca y te lo dice. La pide al llavero cada vez que lee, se la manda solo a Slack y no la copia ni la anota en ningún lado. Si ya tenés esas llaves en el llavero para otra herramienta, nombrá esas entradas y listo.
+- La lee el servicio, solo, con el mismo ritmo que WhatsApp, y cada fuente lleva su cuenta: si una no anda, la otra se sigue leyendo. La primera vez trae todo lo que escribiste (cien mensajes cada tres segundos, que es lo que deja Slack) y después solo lo nuevo. Si se corta, sigue desde donde había llegado.
+- Entra solo lo que escribiste vos, en canales, mensajes directos y grupos chicos. No entran los mensajes de los demás ni lo que citaste de ellos, el código pegado, las notas que te dejás a vos mismo, lo que le escribís a Slackbot ni las conversaciones que dejaste afuera. Las menciones quedan como «@alguien».
+- Cada conversación queda con el nombre de la persona, o con el del canal y el del espacio («#general (acme)»): el mismo canal en dos espacios son dos. Como con WhatsApp, lo que le escribiste a alguien se muestra de ejemplo solo cuando le vas a escribir a esa persona o a ese canal.
+- Si una llave deja de servir o le falta un permiso, los otros espacios se leen igual, ese se vuelve a intentar al otro día y, si Claude te pide el estilo mientras tanto, la memoria le avisa cuál no se pudo leer y por qué.
 
 **Qué deja afuera.** En una conversación con Claude no todo lo que figura como tuyo lo escribiste vos, así que se queda nada más con lo que es claramente tuyo y, ante la duda, corta:
 

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 
@@ -29,18 +30,63 @@ pub struct WhatsApp {
     pub sin: Vec<String>,
 }
 
+/// De dónde sale la llave de un espacio de Slack.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Llave {
+    /// Del llavero de macOS: el nombre de la entrada donde está guardada.
+    Llavero(String),
+    /// Puesta en el código. Solo para las pruebas: una llave de verdad no se
+    /// escribe en ningún archivo.
+    Fija(String),
+}
+
+impl std::fmt::Debug for Llave {
+    /// Nunca muestra una llave: ni en un registro ni en un error.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Llavero(entrada) => write!(f, "Llavero({entrada:?})"),
+            Self::Fija(_) => f.write_str("Fija(…)"),
+        }
+    }
+}
+
+/// Un espacio de trabajo de Slack del que se lee.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Espacio {
+    /// Cómo lo llama el usuario: así queda nombrado en lo que se guarda.
+    pub nombre: String,
+    pub llave: Llave,
+}
+
+/// Slack como fuente para aprender cómo escribe el usuario.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Slack {
+    /// Los espacios de trabajo (`MEMORIA_SLACK`: «nombre=entrada del
+    /// llavero», separados por punto y coma).
+    pub espacios: Vec<Espacio>,
+    /// Canales y personas que quedan afuera: los que tienen alguno de estos
+    /// textos en el nombre (`MEMORIA_SLACK_SIN`, separados por punto y coma).
+    pub sin: Vec<String>,
+    /// Dónde atiende Slack: siempre el de verdad, salvo en las pruebas.
+    pub api: String,
+    /// Cuánto se espera entre una búsqueda y la siguiente, para no pasarse
+    /// del ritmo que permite Slack.
+    pub pausa: Duration,
+}
+
 /// De dónde más, aparte de las conversaciones con Claude, se aprende cómo
 /// escribe el usuario. Cada fuente se enciende aparte; apagada, no se lee.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Fuentes {
     pub whatsapp: Option<WhatsApp>,
+    pub slack: Option<Slack>,
 }
 
 impl Fuentes {
     /// Si hay alguna fuente encendida.
     #[must_use]
     pub const fn alguna(&self) -> bool {
-        self.whatsapp.is_some()
+        self.whatsapp.is_some() || self.slack.is_some()
     }
 }
 
@@ -81,8 +127,8 @@ pub struct Config {
     /// Carpeta donde Claude Code guarda las conversaciones
     /// (`MEMORIA_CONVERSACIONES`, por defecto `~/.claude/projects`).
     pub conversaciones: PathBuf,
-    /// Las fuentes encendidas (`MEMORIA_FUENTES`, separadas por coma; hoy
-    /// solo `whatsapp`). Por defecto, ninguna.
+    /// Las fuentes encendidas (`MEMORIA_FUENTES`, separadas por coma:
+    /// `whatsapp`, `slack`). Por defecto, ninguna.
     pub fuentes: Fuentes,
 }
 
@@ -93,27 +139,79 @@ const MODELO_INTERNO: &str = "gemma";
 const MODELO_DE_OLLAMA: &str = "bge-m3";
 const HILOS_MAXIMOS: usize = 8;
 const BASE_DE_WHATSAPP: &str = "Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite";
+/// Dónde atiende Slack.
+pub const API_DE_SLACK: &str = "https://slack.com/api";
+/// Slack deja hacer unas veinte búsquedas por minuto.
+const PAUSA_DE_SLACK: Duration = Duration::from_secs(3);
 
-/// Lee `MEMORIA_FUENTES` («whatsapp», o «ninguna») y arma cada fuente
-/// encendida con lo suyo: dónde está la base de WhatsApp (`base`, o la de
-/// siempre dentro de `casa`) y qué chats quedan afuera (`sin`).
-fn leer_fuentes(texto: Option<&str>, casa: &Path, base: Option<&str>, sin: Option<&str>) -> anyhow::Result<Fuentes> {
+/// Una lista separada por punto y coma, sin los lugares vacíos.
+fn lista(texto: Option<&str>) -> Vec<String> {
+    texto
+        .unwrap_or_default()
+        .split(';')
+        .map(|parte| parte.trim().to_owned())
+        .filter(|parte| !parte.is_empty())
+        .collect()
+}
+
+/// Lee `MEMORIA_SLACK`: de cada espacio de trabajo, el nombre que le pone el
+/// usuario y en qué entrada del llavero está su llave («acme=slack-acme;
+/// globex=slack-globex»).
+fn leer_espacios(texto: Option<&str>) -> anyhow::Result<Vec<Espacio>> {
+    let mut espacios: Vec<Espacio> = Vec::new();
+    for parte in lista(texto) {
+        let (nombre, entrada) = match parte.split_once('=') {
+            Some((nombre, entrada)) if !nombre.trim().is_empty() && !entrada.trim().is_empty() => {
+                (nombre.trim().to_owned(), entrada.trim().to_owned())
+            }
+            _ => bail!("MEMORIA_SLACK: «{parte}» tiene que ser «nombre=entrada del llavero»"),
+        };
+        if entrada.starts_with("xox") {
+            bail!(
+                "MEMORIA_SLACK: en «{nombre}» va el nombre de la entrada del llavero donde está la llave, no la \
+                 llave: una llave no se escribe en ningún archivo"
+            );
+        }
+        if espacios.iter().any(|espacio| espacio.nombre.eq_ignore_ascii_case(&nombre)) {
+            bail!("MEMORIA_SLACK: el espacio «{nombre}» está dos veces");
+        }
+        espacios.push(Espacio { nombre, llave: Llave::Llavero(entrada) });
+    }
+    if espacios.is_empty() {
+        bail!(
+            "MEMORIA_FUENTES enciende Slack, pero falta MEMORIA_SLACK: de cada espacio de trabajo, un nombre y la \
+             entrada del llavero donde está su llave («acme=slack-acme»)"
+        );
+    }
+    Ok(espacios)
+}
+
+/// Lee `MEMORIA_FUENTES` («whatsapp», «slack», o «ninguna») y arma cada
+/// fuente encendida con lo suyo, que saca de `var`: de WhatsApp, dónde está
+/// la base (`MEMORIA_WHATSAPP`, o la de siempre dentro de `casa`) y qué chats
+/// quedan afuera (`MEMORIA_WHATSAPP_SIN`); de Slack, los espacios de trabajo
+/// (`MEMORIA_SLACK`) y qué canales y personas quedan afuera
+/// (`MEMORIA_SLACK_SIN`).
+fn leer_fuentes(texto: Option<&str>, casa: &Path, var: &dyn Fn(&str) -> Option<String>) -> anyhow::Result<Fuentes> {
     let mut fuentes = Fuentes::default();
     for nombre in texto.unwrap_or_default().split(',').map(|n| n.trim().to_lowercase()).filter(|n| !n.is_empty()) {
         match nombre.as_str() {
             "ninguna" => return Ok(Fuentes::default()),
             "whatsapp" => {
                 fuentes.whatsapp = Some(WhatsApp {
-                    base: base.map_or_else(|| casa.join(BASE_DE_WHATSAPP), PathBuf::from),
-                    sin: sin
-                        .unwrap_or_default()
-                        .split(';')
-                        .map(|chat| chat.trim().to_owned())
-                        .filter(|chat| !chat.is_empty())
-                        .collect(),
+                    base: var("MEMORIA_WHATSAPP").map_or_else(|| casa.join(BASE_DE_WHATSAPP), PathBuf::from),
+                    sin: lista(var("MEMORIA_WHATSAPP_SIN").as_deref()),
                 });
             }
-            otra => bail!("MEMORIA_FUENTES: no conozco la fuente «{otra}»; hoy la única es «whatsapp»"),
+            "slack" => {
+                fuentes.slack = Some(Slack {
+                    espacios: leer_espacios(var("MEMORIA_SLACK").as_deref())?,
+                    sin: lista(var("MEMORIA_SLACK_SIN").as_deref()),
+                    api: API_DE_SLACK.to_owned(),
+                    pausa: PAUSA_DE_SLACK,
+                });
+            }
+            otra => bail!("MEMORIA_FUENTES: no conozco la fuente «{otra}»; las que hay son «whatsapp» y «slack»"),
         }
     }
     Ok(fuentes)
@@ -197,12 +295,7 @@ impl Config {
             hilos,
             umbrales: var("MEMORIA_UMBRALES").as_deref().map(leer_umbrales).transpose()?,
             conversaciones: var("MEMORIA_CONVERSACIONES").map_or_else(|| casa.join(".claude/projects"), PathBuf::from),
-            fuentes: leer_fuentes(
-                var("MEMORIA_FUENTES").as_deref(),
-                &casa,
-                var("MEMORIA_WHATSAPP").as_deref(),
-                var("MEMORIA_WHATSAPP_SIN").as_deref(),
-            )?,
+            fuentes: leer_fuentes(var("MEMORIA_FUENTES").as_deref(), &casa, &var)?,
             dir,
         })
     }
@@ -238,21 +331,53 @@ mod pruebas {
         assert!(leer_ajustes(Path::new("/no/existe")).is_empty());
     }
 
+    /// Lee las fuentes con estos ajustes puestos, como si vinieran del entorno.
+    fn fuentes_con(texto: Option<&str>, puestos: &[(&str, &str)]) -> anyhow::Result<Fuentes> {
+        let var = |nombre: &str| puestos.iter().find(|(n, _)| *n == nombre).map(|(_, valor)| (*valor).to_owned());
+        leer_fuentes(texto, Path::new("/Users/ana"), &var)
+    }
+
     #[test]
     fn las_fuentes_se_encienden_una_por_una() {
-        let casa = Path::new("/Users/ana");
-        assert_eq!(leer_fuentes(None, casa, None, None).unwrap(), Fuentes::default());
+        assert_eq!(fuentes_con(None, &[]).unwrap(), Fuentes::default());
         assert!(!Fuentes::default().alguna());
-        let encendida = leer_fuentes(Some(" WhatsApp "), casa, None, Some("Familia; Los del colegio ;;")).unwrap();
+        let encendida =
+            fuentes_con(Some(" WhatsApp "), &[("MEMORIA_WHATSAPP_SIN", "Familia; Los del colegio ;;")]).unwrap();
         let whatsapp = encendida.whatsapp.clone().unwrap();
-        assert!(encendida.alguna());
+        assert!(encendida.alguna() && encendida.slack.is_none());
         assert!(whatsapp.base.starts_with("/Users/ana/Library/Group Containers"), "{}", whatsapp.base.display());
         assert_eq!(whatsapp.sin, vec!["Familia", "Los del colegio"]);
-        let en_otro_lado = leer_fuentes(Some("whatsapp"), casa, Some("/tmp/copia.sqlite"), None).unwrap();
+        let en_otro_lado = fuentes_con(Some("whatsapp"), &[("MEMORIA_WHATSAPP", "/tmp/copia.sqlite")]).unwrap();
         assert_eq!(en_otro_lado.whatsapp.unwrap().base, Path::new("/tmp/copia.sqlite"));
         // «ninguna» las apaga todas, y una fuente desconocida no pasa de largo.
-        assert_eq!(leer_fuentes(Some("whatsapp, ninguna"), casa, None, None).unwrap(), Fuentes::default());
-        assert!(leer_fuentes(Some("telegrama"), casa, None, None).is_err());
+        assert_eq!(fuentes_con(Some("whatsapp, ninguna"), &[]).unwrap(), Fuentes::default());
+        assert!(fuentes_con(Some("telegrama"), &[]).is_err());
+    }
+
+    #[test]
+    fn slack_se_enciende_con_sus_espacios_y_sin_ninguna_llave_a_la_vista() {
+        let puestos = [("MEMORIA_SLACK", " acme = slack-acme ; globex=slack-globex;"), ("MEMORIA_SLACK_SIN", "random")];
+        let encendidas = fuentes_con(Some("whatsapp, Slack"), &puestos).unwrap();
+        assert!(encendidas.whatsapp.is_some());
+        let slack = encendidas.slack.unwrap();
+        assert_eq!(
+            slack.espacios,
+            vec![
+                Espacio { nombre: "acme".into(), llave: Llave::Llavero("slack-acme".into()) },
+                Espacio { nombre: "globex".into(), llave: Llave::Llavero("slack-globex".into()) },
+            ]
+        );
+        assert_eq!((slack.api.as_str(), slack.sin), (API_DE_SLACK, vec!["random".to_owned()]));
+        // Sin espacios no hay de dónde leer, y cada uno va con su entrada del llavero.
+        assert!(fuentes_con(Some("slack"), &[]).is_err());
+        for malo in ["acme", "acme=", "=slack-acme", "acme=slack-acme;ACME=otra"] {
+            assert!(fuentes_con(Some("slack"), &[("MEMORIA_SLACK", malo)]).is_err(), "{malo}");
+        }
+        // Una llave pegada en los ajustes no se acepta, y el error no la repite.
+        let pegada = fuentes_con(Some("slack"), &[("MEMORIA_SLACK", "acme=xoxp-una-llave-de-mentira")]).unwrap_err();
+        assert!(pegada.to_string().contains("no la llave") && !pegada.to_string().contains("xoxp"), "{pegada}");
+        // Una llave nunca se muestra.
+        assert_eq!(format!("{:?}", Llave::Fija("xoxp-una-llave-de-mentira".into())), "Fija(…)");
     }
 
     #[test]

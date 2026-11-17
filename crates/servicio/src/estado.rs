@@ -59,10 +59,10 @@ pub struct Estado {
     /// Las fuentes encendidas para aprender cómo escribe el usuario, aparte
     /// de sus conversaciones con Claude.
     pub fuentes: Arc<Fuentes>,
-    /// Desde cuándo (segundos desde 1970) el servicio está leyendo esas
-    /// fuentes; cero si no está leyendo. La lectura puede quedar esperando a
-    /// que el usuario le conteste a macOS si la deja.
-    pub leyendo_fuentes: Arc<AtomicI64>,
+    /// Desde cuándo (segundos desde 1970) el servicio está leyendo
+    /// WhatsApp; cero si no lo está leyendo. Esa lectura puede quedar
+    /// esperando a que el usuario le conteste a macOS si la deja.
+    pub leyendo_whatsapp: Arc<AtomicI64>,
     salud_huellas: Arc<AtomicU8>,
 }
 
@@ -77,7 +77,7 @@ impl Estado {
             nombre: Arc::from(NOMBRE_POR_DEFECTO),
             pendientes: Arc::new(Notify::new()),
             fuentes: Arc::new(Fuentes::default()),
-            leyendo_fuentes: Arc::new(AtomicI64::new(0)),
+            leyendo_whatsapp: Arc::new(AtomicI64::new(0)),
             salud_huellas: Arc::new(AtomicU8::new(SIN_PROBAR)),
         }
     }

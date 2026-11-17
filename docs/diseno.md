@@ -425,9 +425,9 @@ personal-memory/
 ### 4.10 Seguridad y privacidad
 
 - Todo queda en la Mac. El servicio escucha solo localmente y pide clave; la base es un archivo que solo puede leer su dueño.
-- La única vez que el servicio usa internet es para bajar el modelo de huellas, al instalar. Después corre sin conexión.
+- El servicio usa internet para bajar el modelo de huellas, al instalar, y, solo si se encendió Slack como fuente (4.11), para pedirle a Slack los mensajes del propio usuario: de ahí entra texto suyo y no sale nada de la memoria. Sin Slack corre sin conexión.
 - Lo único que sale es lo que ve el agente de mantenimiento al usar Claude: el código y el ejemplo del reporte, que puede incluir partes de notas.
-- No se guarda ninguna llave de Claude: el agente usa la sesión de la conversación donde corre.
+- No se guarda ninguna llave de Claude: el agente usa la sesión de la conversación donde corre. Tampoco las de Slack: quedan en el llavero de macOS, y el servicio las pide cada vez que lee.
 - Filtro de secretos antes de guardar notas y fragmentos.
 - Ningún agente borra datos: solo se descartan.
 
@@ -471,20 +471,35 @@ Los chats con Claude muestran cómo escribe el usuario cuando escribe rápido. P
 - **Comprobado con una base real** (16/11/2026): la base tiene la forma esperada; decenas de miles de mensajes se leen en pocos segundos, copia incluida; y de los mensajes que llevan las banderas de reenviado, más de ocho de cada diez eran palabra por palabra un texto recibido antes. Sobre el permiso: el cartel apareció al leer desde Claude Code; después de aceptarlo, el servicio (lanzado por launchd) leyó sin que apareciera otro. No se sabe todavía si vuelve después de reiniciar la máquina.
 - **Lo que se pierde, a sabiendas:** el filtro corta un mensaje en el primer párrafo que presenta algo («tengo dos cosas:»), porque en una conversación con Claude lo que sigue suele ser pegado. En una mensajería muchas veces sigue una lista escrita por el usuario, y esa parte no se guarda. Son pocos mensajes y lo que queda es suyo.
 
+#### Tercera parte: Slack, hecha en la 0.9 (17/11/2026)
+
+Slack es donde se escribe por trabajo, y ahí el tono es otro que en WhatsApp. Es la segunda fuente optativa: `MEMORIA_FUENTES=whatsapp,slack` (o solo `slack`), con `MEMORIA_SLACK` para decir de qué espacios de trabajo.
+
+- **Quién lee y con qué.** El servicio, en la misma tarea que WhatsApp (`estilo/fuentes.rs`), le pide a Slack por internet los mensajes del propio usuario (`estilo/slack.rs`). No hay una base local que leer: la aplicación de escritorio guarda en la máquina solo una parte de lo reciente. Por eso hace falta una llave de cada espacio: la de una app de Slack del usuario, de solo lectura, con los permisos de usuario `search:read` (buscar sus mensajes) y `users:read` (el nombre de la persona de un mensaje directo).
+- **Dónde está la llave.** En el llavero de macOS, y en ningún otro lado. `MEMORIA_SLACK` lleva, de cada espacio, el nombre que le pone el usuario y el de la entrada del llavero («acme=slack-acme»); la cuenta es siempre `token`. El servicio se la pide al llavero cada vez que lee (con `security find-generic-password`, que no muestra ningún cartel si la entrada se guardó con `security`), la usa y la suelta. Cuidados que están en el código: una llave pegada en los ajustes se rechaza al arrancar; la llave viaja solo a `https://slack.com/api`, sin seguir a nadie que mande a otro lado; lo que la guarda en memoria no se puede imprimir; y los errores se arman sin la dirección pedida. Si quien usa la memoria ya tiene esas llaves en el llavero para otra herramienta (un conector local de Slack para Claude, por ejemplo), alcanza con nombrar esas entradas: no se duplica nada.
+- **Qué se pide.** Una búsqueda: `search.messages` con `from:<@usuario>` (el identificador sale de `auth.test`), del mensaje más viejo al más nuevo, de a cien, siguiendo el cursor que da Slack (el paginado por números de página se corta a los diez mil resultados). Es un solo pedido para todos los canales, mensajes directos y grupos, y no trae nada de los demás. Slack deja unas veinte búsquedas por minuto: se hace una cada tres segundos y, si igual pide ir más despacio, se espera lo que diga.
+- **Desde dónde sigue.** De cada espacio queda anotado el momento del último mensaje visto (`lecturas_propias`, con el nombre del espacio). La lectura siguiente pide desde dos días antes de ese momento (Slack filtra por día, y tarda un rato en dejar buscar lo recién escrito) y saltea lo ya visto. Se guarda página por página: si la primera lectura, que es larga, se corta, la siguiente sigue desde ahí.
+- **Qué entra.** Lo que escribió el usuario en canales, mensajes directos y grupos chicos, pasado a como lo escribió: las menciones quedan como «@alguien» (a quién nombró no hace a cómo escribe), los canales y los enlaces como texto, los emojis más comunes como emojis, sin el código entre acentos graves y sin lo que citó de otro. Después pasa por el mismo filtro que todo lo demás (lo pegado, los datos, los secretos). No entran las notas que se deja a sí mismo, lo que le escribe al ayudante de Slack ni las conversaciones que dejó afuera por nombre (`MEMORIA_SLACK_SIN`).
+- **A quién le escribe.** Un mensaje directo queda con el nombre de la persona; un grupo chico, con los usuarios de los demás; un canal, con su nombre y el del espacio («#general (acme)»). Así el mismo canal en dos espacios son dos conversaciones, y con la regla de siempre (los ejemplos son de la charla con ese destinatario) lo escrito en el canal de un espacio no se muestra al escribir en el de otro. Una persona que está en dos espacios con el mismo nombre cuenta como una sola. Si Slack no da el nombre de alguien, el mensaje vale para medir pero no es ejemplo de nadie.
+- **Cada fuente lleva su cuenta.** La última lectura de cada una se anota aparte (`juntada:whatsapp`, `juntada:slack`): si una falla, se reintenta al otro día sin demorar a la otra. Dentro de Slack, un espacio que no se puede leer (una llave anulada, un permiso que falta) no frena a los demás: se lee lo que se puede, y la lectura queda como fallida con el nombre del espacio y el motivo, que es lo que `memoria_estilo` le avisa a Claude.
+- **`memoria juntar --probar`** con Slack pregunta cuántos mensajes hay (una búsqueda por espacio) y no trae ninguno.
+- **Comprobado con dos espacios reales** (17/11/2026), sobre una copia de la base: la primera lectura trajo unos diez mil mensajes en cinco minutos, y nueve de cada diez quedaron como propios después del filtro. En lo guardado no quedó ningún resto del formato de Slack, todos los mensajes directos quedaron con el nombre de la persona, y los emojis sin pasar aparecen en dos de cada mil mensajes. Una segunda lectura tardó dos segundos y no trajo nada. El llavero entregó las llaves sin mostrar ningún cartel.
+- **Lo que se pierde, a sabiendas:** los emojis que no están entre los más comunes quedan con su nombre (`:nombre:`) y no se cuentan como emojis; lo que el usuario editó después de mandarlo no se vuelve a leer; y un mensaje que mandó una integración en su nombre no se distingue de uno escrito por él.
+
 #### Lo que falta (propuesta, sin acordar)
 
 - **Se elige al instalar:** el instalador pregunta qué fuentes conectar, una por una, y solo lee las que se aceptan. Queda anotado en la configuración y se cambia corriendo el instalador de nuevo.
 - **Qué se junta, cada día:** solo los mensajes que escribió el usuario, nunca los de los demás.
   - Chats con Claude: hecho.
   - WhatsApp: hecho (ver arriba).
-  - Slack: los espacios que ya tienen conector en esta Mac.
+  - Slack: hecho (ver arriba).
   - Mails enviados (sugerencia): es la mejor fuente para aprender cómo escribe los mails.
 - **Qué se guarda:**
   - Los mensajes propios, con de dónde salieron (lugar, conversación, a quién, idioma, fecha) y su huella. Pasan por el filtro de secretos.
   - Un perfil por lugar e idioma, con dos partes: los números que calcula el programa (largo, signos, mayúsculas, acentos, emojis, saludos y despedidas, muletillas, mezcla de idiomas) y una descripción corta que escribe el modelo local de noche.
 - **Privacidad:** todo queda en la Mac.
 - **La descripción en palabras** (más allá de los números) la podría escribir un agente lanzado por el mod dentro de una conversación, como el de las mejoras (4.8), sin llave. Ese agente no necesitaría ninguna herramienta: recibe una muestra y devuelve un texto.
-- **Preguntas abiertas:** cómo se lee Slack sin duplicar las claves que hoy tienen los conectores locales, y de dónde se lee el correo enviado. Las otras tres quedaron contestadas con WhatsApp: los chats se dejan afuera por nombre, el servicio puede leer los datos de otra aplicación si el usuario acepta el cartel del sistema (una vez por arranque, como mucho), y de quien recibe se guarda el nombre y no el número.
+- **Preguntas abiertas:** de dónde se lee el correo enviado. La de Slack quedó contestada (las llaves se leen del llavero, donde ya las tienen los conectores locales, sin copiarlas), y las otras tres, con WhatsApp: los chats se dejan afuera por nombre, el servicio puede leer los datos de otra aplicación si el usuario acepta el cartel del sistema (una vez por arranque, como mucho), y de quien recibe se guarda el nombre y no el número.
 
 ### 4.12 Versión 0.4: un archivo y un modelo adentro (13/11/2026)
 

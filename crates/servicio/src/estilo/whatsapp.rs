@@ -23,7 +23,7 @@ use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{ConnectOptions, SqlitePool};
 
-use super::idioma;
+use super::fuentes::excluido;
 use super::propios::{self, Propio};
 use crate::config::WhatsApp;
 use crate::texto;
@@ -122,12 +122,6 @@ fn fecha_de(segundos: f64) -> Option<DateTime<Utc>> {
 /// difusión o un canal).
 fn es_chat(interno: Option<&str>) -> bool {
     interno.is_some_and(|i| DE_CHAT.iter().any(|fin| i.ends_with(fin)))
-}
-
-/// Si el chat está entre los que el usuario dejó afuera.
-fn excluido(nombre: Option<&str>, sin: &[String]) -> bool {
-    let nombre = idioma::plano(nombre.unwrap_or_default());
-    sin.iter().map(|s| idioma::plano(s.trim())).any(|s| !s.is_empty() && nombre.contains(&s))
 }
 
 /// El nombre del chat, si es un nombre: un contacto sin agendar figura con su
@@ -298,16 +292,6 @@ mod pruebas {
         assert!(!es_chat(Some("status@broadcast")));
         assert!(!es_chat(Some("120363000000000000@newsletter")));
         assert!(!es_chat(None));
-    }
-
-    #[test]
-    fn deja_afuera_los_chats_que_eligio_el_usuario() {
-        let sin = vec!["Familia".to_owned(), " los del cole ".to_owned(), String::new()];
-        assert!(excluido(Some("FAMILIA Pérez 👪"), &sin));
-        assert!(excluido(Some("Mamis: Los del Cole 2026"), &sin));
-        assert!(!excluido(Some("Ana Trabajo"), &sin));
-        assert!(!excluido(None, &sin));
-        assert!(!excluido(Some("Familia"), &[]));
     }
 
     #[test]

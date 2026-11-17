@@ -160,7 +160,7 @@ async fn preparar_huellas(cfg: &Config) -> anyhow::Result<String> {
     }
 }
 
-/// Lee ahora las fuentes encendidas (hoy, WhatsApp) y guarda lo que el
+/// Lee ahora las fuentes encendidas (WhatsApp, Slack) y guarda lo que el
 /// usuario escribió en ellas; con `probar`, solo cuenta lo que entraría. Es
 /// lo que corre `memoria juntar`, a mano: el servicio las lee solo cuando
 /// toca. Devuelve si anduvo y qué pasó.

@@ -40,6 +40,11 @@
 #   MEMORIA_FUENTES=whatsapp instalacion/instalar.sh
 #   MEMORIA_FUENTES=whatsapp MEMORIA_WHATSAPP_SIN="Familia;Los del colegio" instalacion/instalar.sh
 #
+# Y de Slack: de cada espacio de trabajo, un nombre y la entrada del llavero
+# donde está su llave de solo lectura (la llave nunca va acá; ver el README):
+#   MEMORIA_FUENTES=whatsapp,slack MEMORIA_SLACK="acme=slack-acme" instalacion/instalar.sh
+#   MEMORIA_FUENTES=slack MEMORIA_SLACK="acme=slack-acme;globex=slack-globex" MEMORIA_SLACK_SIN="random" instalacion/instalar.sh
+#
 # Para elegir cómo se calculan las huellas (se recuerda para la próxima vez):
 #   MEMORIA_MODELO_HUELLAS=e5-small instalacion/instalar.sh   # otro modelo interno
 #   MEMORIA_HUELLAS=ollama instalacion/instalar.sh            # con Ollama (bge-m3)
@@ -155,7 +160,7 @@ AJUSTES="$DIR/ajustes"
 touch "$AJUSTES"
 chmod 600 "$AJUSTES"
 for NOMBRE in MEMORIA_NOMBRE MEMORIA_HUELLAS MEMORIA_MODELO_HUELLAS MEMORIA_OLLAMA MEMORIA_HILOS MEMORIA_UMBRALES \
-              MEMORIA_FUENTES MEMORIA_WHATSAPP MEMORIA_WHATSAPP_SIN; do
+              MEMORIA_FUENTES MEMORIA_WHATSAPP MEMORIA_WHATSAPP_SIN MEMORIA_SLACK MEMORIA_SLACK_SIN; do
   VALOR="${(P)NOMBRE:-}"
   if [[ -n "$VALOR" ]]; then
     grep -v "^$NOMBRE=" "$AJUSTES" > "$AJUSTES.nuevo" || true

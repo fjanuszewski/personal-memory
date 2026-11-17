@@ -2,9 +2,10 @@
 //! escribe, mide cómo lo escribe y se lo cuenta a Claude cuando tiene que
 //! redactar algo que va a salir con su nombre.
 //!
-//! Tres partes: de dónde salen los mensajes ([`propios`], por ahora sus
-//! conversaciones con Claude), qué se mide en ellos ([`numeros`]) y lo que
-//! responde la herramienta `memoria_estilo` ([`consultar`]). Todo queda en la
+//! Tres partes: de dónde salen los mensajes (sus conversaciones con Claude,
+//! en [`propios`], y las fuentes que él encienda: [`whatsapp`] y [`slack`]),
+//! qué se mide en ellos ([`numeros`]) y lo que responde la herramienta
+//! `memoria_estilo` ([`consultar`]). Todo queda en la
 //! base de esta máquina y no hay ningún modelo de por medio: son cuentas.
 
 pub mod fuentes;
@@ -12,6 +13,7 @@ pub mod idioma;
 pub mod lexico;
 pub mod numeros;
 pub mod propios;
+pub mod slack;
 pub mod whatsapp;
 
 use std::collections::{HashMap, HashSet};
