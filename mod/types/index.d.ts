@@ -14,6 +14,11 @@ export type Contexto = {
   resumen: string | null
   /** El motivo de la última falla, o null si la última vez anduvo. */
   error: string | null
+  /**
+   * Si Claude le quitó a esta conversación la conexión con la memoria (ya no la tiene entre las suyas):
+   * `avisada` dice si el aviso quedó a la vista en el chat. null mientras la tiene, o mientras no se sabe.
+   */
+  sinConexion: { avisada: boolean } | null
 }
 
 /** Qué parte de la memoria ya recibió Claude en esta conversación. */

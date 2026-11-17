@@ -29,6 +29,9 @@
 # Se puede correr las veces que haga falta. El guardián solo se actualiza
 # así, a mano: el agente de mejoras nunca lo toca.
 #
+# Si en el paso 7 la conexión se da de alta o cambia, al terminar avisa que
+# hay que cerrar Claude y abrirlo de nuevo (ver `avisar_reinicio`).
+#
 # Para instalar en otra carpeta:
 #   MEMORIA_DIR=/otra/carpeta instalacion/instalar.sh
 #
@@ -65,6 +68,42 @@ DOMINIO="gui/$(id -u)"
 export PATH="/opt/homebrew/opt/rustup/bin:$CASA/.cargo/bin:$PATH"
 
 paso() { print -P "%F{cyan}›%f $1"; }
+
+# Claude toma bien una conexión solo cuando arranca. Lo que este instalador
+# haga con la del MCP no les llega a las conversaciones que ya están abiertas
+# (visto y reproducido con Claude Code 2.1.321 y 2.1.325, el de la app de
+# escritorio):
+#   - una conexión nueva la reciben más tarde, cuando se recarga el mod, pero
+#     la app se la saca cada vez que les manda su lista de conexiones, sin que
+#     Claude diga nada (el mod lo avisa en el chat cuando lo nota), y vuelve
+#     recién con la recarga siguiente;
+#   - si cambió la dirección o la clave, siguen usando la de antes.
+# Las dos cosas se arreglan cerrando Claude y abriéndolo de nuevo. Recibe qué
+# pasó con la conexión: «alta», «cambio» o nada (ya estaba igual, y entonces
+# no hay nada que avisar).
+avisar_reinicio() {
+  local linea
+  local -a motivo
+  case "$1" in
+    alta)
+      motivo=(
+        "La conexión con la memoria es nueva, y Claude solo la toma bien al arrancar: una conversación"
+        "que ya estaba abierta la recibe más tarde y la pierde sola cada tanto, hasta que se reinicia."
+      )
+      ;;
+    cambio)
+      motivo=(
+        "La conexión con la memoria cambió (la dirección o la clave), y Claude solo la lee al arrancar:"
+        "una conversación que ya estaba abierta sigue usando la anterior, y la memoria deja de responderle."
+      )
+      ;;
+    *) return 0 ;;
+  esac
+  print -P "%F{yellow}!%f Si Claude estaba abierto, cerralo del todo y volvé a abrirlo."
+  for linea in "${motivo[@]}"; do print -r -- "  $linea"; done
+  print -r -- "  En la app es salir (⌘Q) y abrirla de nuevo; en una terminal, salir de cada «claude» y volver a entrar."
+  print -r -- "  Las conversaciones que ya tenías siguen ahí, y desde entonces quedan bien conectadas."
+}
 
 # El Claude Code más nuevo que haya: el de la app suele estar más al día que
 # el de la terminal, y el mod necesita 2.1.321 o más.
@@ -220,11 +259,14 @@ paso "Alta del MCP «memoria» para todas las conversaciones"
 CLAVE="$(cat "$DIR/clave")"
 CLAUDE="$(claude_bin)"
 # Si ya está dado de alta con la misma dirección y la misma clave no se toca:
-# darlo de baja y de alta de nuevo puede cortar a las conversaciones abiertas.
+# las conversaciones abiertas siguen como están y no hay que reiniciar nada.
 ALTA="$("$CLAUDE" mcp get memoria 2>/dev/null || true)"
+REINICIAR=""
 if [[ "$ALTA" == *"$DIRECCION/mcp"* && "$ALTA" == *"$CLAVE"* ]]; then
   echo "Ya estaba dado de alta."
 else
+  # Sin ninguna dada de alta es nueva; con una distinta, cambió.
+  if [[ -z "$ALTA" ]]; then REINICIAR="alta"; else REINICIAR="cambio"; fi
   "$CLAUDE" mcp remove memoria --scope user >/dev/null 2>&1 || true
   "$CLAUDE" mcp add --transport http --scope user memoria "$DIRECCION/mcp" \
     --header "Authorization: Bearer $CLAVE" >/dev/null
@@ -263,3 +305,4 @@ arrancar "$GUARDIAN"
 print -P "%F{green}✔%f Memoria instalada en $DIR. Las conversaciones nuevas ya la tienen."
 echo "Las mejoras automáticas no piden nada más: el agente que las hace trabaja de fondo"
 echo "  dentro de la conversación de Claude donde las aceptes, con tu sesión de siempre."
+avisar_reinicio "$REINICIAR"

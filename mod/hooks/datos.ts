@@ -33,6 +33,22 @@ export function motivoDe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+// Cuando la conexión con la memoria no está en la conversación, Claude corta
+// el pedido antes de que salga, con este texto en inglés.
+const SIN_CONECTAR = /no connected MCP tool/i
+
+/** Si un pedido a la memoria falló porque Claude no tiene la conexión, y no por el servicio. */
+export function fueSinConexion(err: unknown): boolean {
+  return SIN_CONECTAR.test(motivoDe(err))
+}
+
+/** Por qué falló un pedido a la memoria, dicho para quien lo lee en /memoria. */
+export function motivoDelPedido(err: unknown): string {
+  return fueSinConexion(err)
+    ? 'Claude no tiene conectada la memoria en esta conversación (puede estar conectándose todavía, o no haber podido)'
+    : motivoDe(err)
+}
+
 /** Lo que importa de `get_session` de la app. */
 export type SesionApp = {
   id: string

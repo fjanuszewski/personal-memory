@@ -217,6 +217,13 @@ Se instala una vez para todas las conversaciones:
 claude mcp add --transport http --scope user memoria http://127.0.0.1:7337/mcp -H "Authorization: Bearer <clave local>"
 ```
 
+**Claude toma bien una conexión solo cuando arranca** (visto el 16/11/2026 con Claude Code 2.1.321, el de la app de escritorio, reproducido en una prueba aislada y visto de nuevo el 17/11/2026 con 2.1.325). Lo que se haga con el alta no les llega a las conversaciones que ya están abiertas:
+- **Una conexión nueva** la reciben más tarde, cuando se recarga el mod, pero no queda como las que se leen al arrancar. Cada vez que la app le manda a la conversación su lista de conexiones (lo hace cuando esa lista cambia), Claude quita las que recibió así y no están en la lista. La quita no deja ningún aviso: las herramientas de la memoria desaparecen hasta la recarga siguiente del mod, y se vuelven a ir con la próxima lista.
+- **Si cambia la dirección o la clave,** la conversación abierta sigue con la conexión de antes, también después de recargar el mod.
+- **Darla de baja y de alta igual que estaba** no cambia nada en las conversaciones abiertas.
+
+Las dos primeras se arreglan cerrando Claude y abriéndolo de nuevo: cada conversación arranca otra vez y lee la conexión al arrancar. Por eso el instalador no toca el alta si ya estaba con la misma dirección y la misma clave, y cuando la da de alta o la cambia avisa, al terminar, que hay que reiniciar Claude. Y desde la 0.9.1 el mod avisa en el chat cuando a una conversación le pasa lo primero (4.4).
+
 | Herramienta | Para qué |
 |---|---|
 | `memoria_contexto(sesion)` | Grupo de la conversación y resumen corto: decisiones vigentes recientes, errores abiertos, pendientes. Máximo unas 30 líneas. |
@@ -242,6 +249,11 @@ Es un mod propio, que se instala desde el catálogo local de este repositorio (`
 - **Mejoras en curso:** mientras haya alguna lanzada desde esta conversación, el mod pregunta su estado cada 10 segundos. Cuando termina:
   - Pone una línea visible en el chat (`$.session.append`, como aviso): *"Memoria: mejora instalada, ahora encuentra sinónimos"* o *"No pude…; quedó como estaba"*.
   - Si se instaló, manda un mensaje corto para que Claude retome lo que había fallado (`$.prompt.submit`). Si Claude está en medio de un turno, el mensaje queda en fila.
+- **Si Claude le quita la conexión a la conversación** (4.3; desde la 0.9.1): antes de cada mensaje el mod le pregunta a Claude cómo está la conexión de la memoria (`$.mcp.connect`, que no le pide nada al servicio).
+  - Si contesta «no listada» después de haberla dado por conectada en esa carga del mod, es un corte: deja una línea a la vista en el chat (una por corte), se lo adjunta a Claude con ese mismo mensaje (qué pasó, que siga sin la memoria y que el usuario ya fue avisado) y `/memoria` lo muestra.
+  - Cuando la conexión vuelve (al recargarse el mod, o sola), registra la conversación de nuevo y Claude recibe que volvió.
+  - No avisa si la conexión está apagada a propósito, si no pudo conectarse o si todavía se está conectando: eso no es un corte.
+  - Hasta la 2.1.321, `$.mcp.connect` solo conocía las conexiones del propio mod y de las demás decía «no listada» siempre. El mod lo nota (dice «no listada» justo después de un pedido a la memoria que anduvo) y con ese Claude no avisa. Probado con 2.1.325, donde sí distingue.
 - **Si la conversación se cerró antes:**
   - El aviso queda pendiente (`avisada = false`) y aparece al volver a abrirla.
   - Si nunca se reabre, aparece en la próxima conversación del mismo grupo.

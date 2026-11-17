@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On, PromptComposeInput, PromptComposeResult, PromptSubmitInput } from 'claude-code'
 
 import { aEncargo, enRegla, normalizar, revisar } from '../hooks/agente'
+import { motivoDelPedido } from '../hooks/datos'
 import { grupoDelResumen, provisorio } from '../hooks/grupos'
 import type { AgenteLanzado } from '../types'
 
@@ -47,6 +48,18 @@ type Mundo = {
   fallasMemoria?: number
   /** Cuántos mensajes tenía la conversación cuando se cargó el mod. */
   turnos?: number
+  /**
+   * Cómo tiene Claude la conexión con la memoria en cada momento: `bien`,
+   * `quitada` (ya no está entre las suyas) o `apagada` (la apagó el usuario).
+   * Sin esto, bien.
+   */
+  conexion?: () => 'bien' | 'quitada' | 'apagada'
+  /** Un Claude que solo reconoce las conexiones del propio mod: de la memoria dice siempre «no listada». */
+  claudeViejo?: boolean
+  /** Algo se niega a dejar avisos del mod a la vista en el chat. */
+  sinAvisos?: boolean
+  /** Cuántos registros se cortan porque la conexión todavía no está, aunque Claude ya la dé por conectada enseguida. */
+  sinConexionAlRegistrar?: number
   /** Las mejoras de la conversación, como las lleva el servicio. La prueba las va cambiando. */
   mejoras?: Mejoras
   /**
@@ -115,6 +128,7 @@ function mundo(on: On, o: Mundo = {}): Visto {
     frenados: [],
   }
   let fallas = o.fallasMemoria ?? 0
+  let cortes = o.sinConexionAlRegistrar ?? 0
   let fallasApp = o.fallasApp ?? 0
   mock.env(on, o.sinApp ? {} : { CLAUDE_CODE_HOST_SESSION_ID: 'local_1' })
   on('command.register', () => ({ value: { command: 'memoria' } }))
@@ -178,6 +192,7 @@ function mundo(on: On, o: Mundo = {}): Visto {
   })
   // La fila la guarda el motor: acá solo se mira qué dejó el mod.
   on('session.append', (_, e, next) => {
+    if (o.sinAvisos) return { deny: 'acá no se dejan avisos' }
     const [bloque] = e.message.content
     visto.avisos.push(bloque?.type === 'text' ? String(bloque.text) : '')
 
@@ -197,8 +212,36 @@ function mundo(on: On, o: Mundo = {}): Visto {
 
     return { text: e.text, context: e.context }
   })
+  const conexion = () => (o.conexion ? o.conexion() : 'bien')
+  // Lo que contesta Claude cuando un mod le pregunta por una conexión.
+  on('mcp.connect', (_, e) => {
+    if (o.claudeViejo || conexion() === 'quitada') {
+      return {
+        value: {
+          isConnected: false as const,
+          reason: 'unlisted' as const,
+          message: `Neither this plugin's manifest nor /mcp lists an MCP server named "${e.server}".`,
+        },
+      }
+    }
+    if (conexion() === 'apagada') {
+      return {
+        value: { isConnected: false as const, reason: 'disabled' as const, message: `"${e.server}" is turned off.` },
+      }
+    }
+
+    return { value: { isConnected: true as const, server: e.server } }
+  })
   on('mcp.call', (_, e) => {
     const llamada = e as unknown as Llamada
+    // Sin la conexión el pedido no llega al servicio: Claude lo corta antes, con este texto.
+    const sinConexion = () => texto(`no connected MCP tool "${llamada.tool}" on a server named "memoria"`, true)
+    if (llamada.server === 'memoria' && conexion() !== 'bien') return sinConexion()
+    if (llamada.server === 'memoria' && llamada.tool === 'memoria_contexto' && cortes > 0) {
+      cortes -= 1
+
+      return sinConexion()
+    }
     visto.llamadas.push(llamada)
     if (llamada.server === 'ccd_session_mgmt') {
       if (o.sinApp) return texto('No existe el servidor ccd_session_mgmt', true)
@@ -275,6 +318,8 @@ function mundo(on: On, o: Mundo = {}): Visto {
 const registros = (v: Visto) =>
   v.llamadas.filter(l => l.server === 'memoria' && l.tool === 'memoria_contexto')
 const deLaApp = (v: Visto) => v.llamadas.filter(l => l.server === 'ccd_session_mgmt')
+// Todo lo que llegó al servicio de la memoria.
+const alServicio = (v: Visto) => v.llamadas.filter(l => l.server === 'memoria')
 const aLaMemoria = (v: Visto) =>
   v.llamadas.filter(l => l.server === 'memoria' && l.tool === 'memoria_mejora_estado')
 // Las preguntas de cada vuelta por las mejoras de la conversación (sin los
@@ -322,6 +367,13 @@ const deOtraConversacion = (text: string): PromptSubmitInput => ({
   origin: { kind: 'peer-send-message' },
 })
 const finDeTurno = { answer: 'listo', durationMs: 10, isAborted: false, turnId: 't1', reason: 'answer' } as const
+// El comando /memoria, escrito por el usuario.
+const COMANDO = {
+  command: 'memoria',
+  args: '',
+  origin: { kind: 'composer' },
+  presentation: { isFullscreen: false, columns: 80 },
+} as const
 
 test('registra la conversación con el grupo del costado y suma la sección', async ($, on) => {
   const clock = mock.clock(on, { now: Date.parse('2026-11-12T15:00:00.000Z') })
@@ -569,6 +621,211 @@ test('el prompt mínimo (bare) queda como está', async ($, on) => {
   await clock.settle()
   const { sections } = await $.prompt.compose({ ...PEDIDO, traits: ['bare'] })
   expect(sections.map(s => s.id)).toEqual(['intro'])
+})
+
+test('si Claude le quita la conexión a la conversación, lo avisa en el chat una vez y se lo cuenta a Claude', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  let conexion: 'bien' | 'quitada' = 'bien'
+  const visto = mundo(on, { conexion: () => conexion })
+
+  await $.session.start(INICIO)
+  await clock.settle()
+  await seccion(e => $.prompt.compose(e))
+  await $.prompt.submit(mensaje('hola'))
+  expect(visto.avisos).toEqual([])
+  expect(visto.adjuntos[0]).toBeUndefined()
+
+  // La app le manda su lista de conexiones y la de la memoria se va, sin que nada lo diga.
+  conexion = 'quitada'
+  const pedidos = alServicio(visto).length
+  await $.prompt.submit(mensaje('seguimos'))
+  expect(visto.avisos.length).toBe(1)
+  expect(visto.avisos[0]).toContain('Claude le quitó a esta conversación la conexión con la memoria')
+  expect(visto.avisos[0]).toContain('cerrá Claude del todo y volvé a abrirlo')
+  // Claude se entera con ese mismo mensaje, y sabe que el usuario ya lo vio.
+  const [adjunto] = visto.adjuntos[1] ?? []
+  expect(adjunto).toContain('Actualización de la memoria: En esta conversación la memoria no está conectada ahora')
+  expect(adjunto).toContain('no la busques con ToolSearch ni digas que guardaste algo')
+  expect(adjunto).toContain('El usuario ya lo vio avisado en el chat')
+  // Para saberlo no le pidió nada al servicio: se lo preguntó a Claude.
+  expect(alServicio(visto).length).toBe(pedidos)
+
+  // Con los mensajes siguientes no repite nada.
+  await $.prompt.submit(mensaje('otra cosa'))
+  expect(visto.avisos.length).toBe(1)
+  expect(visto.adjuntos[2]).toBeUndefined()
+
+  // El comando dice lo mismo, sin sumar otro aviso.
+  const { text } = await $.command.run(COMANDO)
+  expect(text).toContain('Claude le quitó a esta conversación la conexión con la memoria')
+  expect(text).not.toContain('El servicio no respondió')
+  expect(visto.avisos.length).toBe(1)
+  // Y si la conversación se resume, las instrucciones nuevas lo dicen primero.
+  const sinMemoria = await seccion(e => $.prompt.compose(e))
+  expect(sinMemoria.memoria?.text.startsWith('# Memoria del grupo\n\nEn esta conversación la memoria no está conectada ahora')).toBe(true)
+
+  // Se instala una versión nueva: el mod se recarga, la conexión vuelve y Claude se entera.
+  conexion = 'bien'
+  await $.session.start(INICIO)
+  await clock.settle()
+  await $.prompt.submit(mensaje('sigo'))
+  const vuelta = visto.adjuntos.at(-1)?.[0]
+  expect(vuelta).toContain('la memoria volvió a estar conectada en esta conversación')
+  expect(vuelta).toContain(RESUMEN)
+  expect(visto.avisos.length).toBe(1)
+  expect((await $.command.run(COMANDO)).text).toContain('El servicio respondió bien.')
+
+  // Hasta que el usuario cierre y abra Claude se puede volver a cortar: avisa de nuevo.
+  conexion = 'quitada'
+  await $.prompt.submit(mensaje('y esto'))
+  expect(visto.avisos.length).toBe(2)
+  expect(visto.adjuntos.at(-1)?.[0]).toContain('la memoria no está conectada ahora')
+})
+
+test('si la conexión vuelve sin que el mod se recargue, también se lo cuenta a Claude', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  let conexion: 'bien' | 'quitada' = 'bien'
+  const visto = mundo(on, { conexion: () => conexion })
+
+  await $.session.start(INICIO)
+  await clock.settle()
+  await seccion(e => $.prompt.compose(e))
+  conexion = 'quitada'
+  await $.prompt.submit(mensaje('hola'))
+  expect(visto.avisos.length).toBe(1)
+
+  conexion = 'bien'
+  await $.prompt.submit(mensaje('seguimos'))
+  const [adjunto] = visto.adjuntos[1] ?? []
+  expect(adjunto).toContain('la memoria volvió a estar conectada en esta conversación')
+  expect(adjunto).toContain('su id es `local_1`')
+  // Y trae el resumen leído de nuevo.
+  expect(registros(visto).length).toBe(2)
+  expect(adjunto).toContain(RESUMEN)
+  await $.prompt.submit(mensaje('otra'))
+  expect(visto.adjuntos[2]).toBeUndefined()
+  expect(visto.avisos.length).toBe(1)
+})
+
+test('una conexión que no anduvo desde que se cargó el mod no es un corte: no avisa en el chat', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  let conexion: 'bien' | 'quitada' = 'quitada'
+  const visto = mundo(on, { conexion: () => conexion })
+
+  // La conversación arranca y la conexión todavía no está (se está conectando, o no pudo).
+  await $.session.start(INICIO)
+  await clock.settle()
+  await seccion(e => $.prompt.compose(e))
+  await $.prompt.submit(mensaje('hola'))
+  expect(visto.avisos).toEqual([])
+  // El comando lo dice en castellano, no con el texto de Claude.
+  const { text } = await $.command.run(COMANDO)
+  expect(text).toContain('El servicio no respondió: Claude no tiene conectada la memoria en esta conversación')
+  expect(text).not.toContain('no connected MCP tool')
+  expect(visto.avisos).toEqual([])
+
+  // Cuando aparece, sigue como siempre: el resumen va con el próximo mensaje.
+  conexion = 'bien'
+  await clock.advance(6_000)
+  await $.prompt.submit(mensaje('seguimos'))
+  expect(visto.adjuntos.at(-1)?.[0]).toContain(RESUMEN)
+  expect(visto.adjuntos.at(-1)?.[0]).not.toContain('volvió a estar conectada')
+  expect(visto.avisos).toEqual([])
+})
+
+test('avisa aunque el registro haya fallado: alcanza con que Claude la haya dado por conectada', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  let conexion: 'bien' | 'quitada' = 'bien'
+  // El mod se recarga un instante antes que la conexión: el primer registro no sale. (En una terminal,
+  // donde no hay grupo del costado que revisar antes de cada mensaje.)
+  const visto = mundo(on, { conexion: () => conexion, sinConexionAlRegistrar: 1, sinApp: true })
+
+  await $.session.start({ ...INICIO, surface: 'terminal' })
+  await clock.settle()
+  await seccion(e => $.prompt.compose(e))
+  expect(registros(visto).length).toBe(0)
+  // Con el primer mensaje ve que la conexión está y registra, sin esperar al reintento.
+  await $.prompt.submit(mensaje('hola'))
+  expect(registros(visto).length).toBe(1)
+  expect(visto.adjuntos[0]?.[0]).toContain(RESUMEN)
+  expect(visto.avisos).toEqual([])
+
+  // Se corta: es un corte de verdad, porque Claude ya la había dado por conectada.
+  conexion = 'quitada'
+  await $.prompt.submit(mensaje('seguimos'))
+  expect(visto.avisos.length).toBe(1)
+  expect(visto.adjuntos.at(-1)?.[0]).toContain('la memoria no está conectada ahora')
+})
+
+test('si lo que falla es el servicio y no la conexión, no avisa ni apura el registro', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  const visto = mundo(on, { fallasMemoria: 1, sinApp: true })
+
+  await $.session.start({ ...INICIO, surface: 'terminal' })
+  await clock.settle()
+  await seccion(e => $.prompt.compose(e))
+  expect(registros(visto).length).toBe(1)
+  // Claude tiene la conexión, pero el servicio no contestó: eso lo arregla el reintento, no el mensaje.
+  await $.prompt.submit(mensaje('hola'))
+  expect(registros(visto).length).toBe(1)
+  expect(visto.avisos).toEqual([])
+  expect((await $.command.run(COMANDO)).text).toContain('El servicio respondió bien.')
+})
+
+test('el corte de Claude por una conexión que no está se dice en castellano', () => {
+  // El texto con que Claude 2.1.321 y 2.1.325 cortan el pedido de un mod a una conexión que no tienen.
+  const deClaude = new Error('memoria: $.mcp.call: no connected MCP tool "memoria_contexto" on a server named "memoria"')
+  expect(motivoDelPedido(deClaude)).toBe(
+    'Claude no tiene conectada la memoria en esta conversación (puede estar conectándose todavía, o no haber podido)',
+  )
+  // Cualquier otra falla queda como vino.
+  expect(motivoDelPedido(new Error('memoria apagada'))).toBe('memoria apagada')
+  expect(motivoDelPedido('sin respuesta')).toBe('sin respuesta')
+})
+
+test('si el usuario apagó la memoria en la conversación, no avisa nada', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  let conexion: 'bien' | 'apagada' = 'bien'
+  const visto = mundo(on, { conexion: () => conexion })
+
+  await $.session.start(INICIO)
+  await clock.settle()
+  await seccion(e => $.prompt.compose(e))
+  conexion = 'apagada'
+  await $.prompt.submit(mensaje('hola'))
+  expect(visto.avisos).toEqual([])
+  expect(visto.adjuntos[0]).toBeUndefined()
+})
+
+test('con un Claude que no sabe decir si la conexión está, no avisa', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  const visto = mundo(on, { claudeViejo: true })
+
+  // La memoria anda, pero ese Claude contesta «no listada» igual: no se le puede creer.
+  await $.session.start(INICIO)
+  await clock.settle()
+  expect(registros(visto).length).toBe(1)
+  await seccion(e => $.prompt.compose(e))
+  await $.prompt.submit(mensaje('hola'))
+  expect(visto.avisos).toEqual([])
+  expect(visto.adjuntos[0]).toBeUndefined()
+})
+
+test('si no puede dejar el aviso a la vista, le pide a Claude que se lo diga al usuario', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T15:00:00.000Z') })
+  let conexion: 'bien' | 'quitada' = 'bien'
+  const visto = mundo(on, { conexion: () => conexion, sinAvisos: true })
+
+  await $.session.start(INICIO)
+  await clock.settle()
+  await seccion(e => $.prompt.compose(e))
+  conexion = 'quitada'
+  await $.prompt.submit(mensaje('hola'))
+  expect(visto.avisos).toEqual([])
+  const [adjunto] = visto.adjuntos[0] ?? []
+  expect(adjunto).toContain('la memoria no está conectada ahora')
+  expect(adjunto).toContain('Avisale al usuario, en una línea')
+  expect(adjunto).not.toContain('ya lo vio avisado')
 })
 
 test('sigue una mejora aceptada y, cuando se instala, avisa en el chat y hace que Claude retome', async ($, on) => {

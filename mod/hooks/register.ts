@@ -8,6 +8,11 @@
 // costado, la memoria respondió tarde, el mod se cargó con la conversación ya
 // empezada) se le adjunta a Claude con el próximo mensaje, una sola vez.
 //
+// Antes de cada mensaje mira si Claude le quitó a la conversación la conexión
+// con la memoria (le pasa a las que ya estaban abiertas cuando se dio de alta,
+// docs/diseno.md 4.3): si pasó, lo deja avisado en el chat y se lo cuenta a
+// Claude, para que no trabaje como si la tuviera.
+//
 // Además sigue las mejoras de la memoria que el usuario aceptó en la conversación:
 // cuando una termina, deja el aviso en el chat y, si se instaló, le pide a
 // Claude que retome lo que había fallado.
@@ -39,12 +44,12 @@ import {
   TIPO_AGENTE,
 } from './agente'
 import type { Encargo } from './agente'
-import { aSesionApp, motivoDe, textoDe, textoSuelto } from './datos'
+import { aSesionApp, fueSinConexion, motivoDe, motivoDelPedido, textoDe, textoSuelto } from './datos'
 import type { SesionApp } from './datos'
 import { grupoDelResumen, provisorio } from './grupos'
 import { leerEstado, retomar } from './mejoras'
 import type { EstadoMejoras } from './mejoras'
-import { actualizacion, claveDe, ID_SECCION, seccion } from './seccion'
+import { actualizacion, AVISO_SIN_CONEXION, claveDe, ID_SECCION, seccion } from './seccion'
 
 const SERVIDOR = 'memoria'
 const SESIONES = 'ccd_session_mgmt'
@@ -71,7 +76,7 @@ const SIN_RESUMEN = 'El agente terminó, pero no quedó registrado su resumen.'
 // Cambiar la etiqueta si cambian los campos (o si lo guardado por una versión
 // anterior ya no sirve): descarta lo que sobrevive a la recarga.
 const contexto = atom({ plugin: 'memoria', key: 'contexto' } as const, null, {
-  shape: 'contexto-3',
+  shape: 'contexto-4',
 })
 const SIN_ENTREGA: Entrega = { compuesto: false, clave: null }
 const entrega = atom({ plugin: 'memoria', key: 'entrega' } as const, SIN_ENTREGA, {
@@ -125,6 +130,29 @@ async function pedirMemoria(
   return texto
 }
 
+// Si el `$.mcp.connect` de este Claude reconoce la conexión de la memoria
+// cuando está. Hasta la 2.1.321 solo conocía las conexiones del propio mod y
+// de cualquier otra decía «no listada», estuviera o no. Se averigua en cada
+// carga del mod: sabe si alguna vez la da por conectada, y no sabe si dice
+// «no listada» justo después de un pedido a la memoria que anduvo. Recién
+// cuando sabe, un «no listada» quiere decir que Claude se la quitó a la
+// conversación. null: todavía no se sabe.
+let conectarSabe: boolean | null = null
+
+// Cómo está la conexión con la memoria según Claude, sin pedirle nada al
+// servicio. `otra` es todo lo que acá no se avisa: apagada por el usuario,
+// sin poder conectarse, o sin respuesta.
+async function conexion($: EngineInterface): Promise<'conectada' | 'quitada' | 'otra'> {
+  try {
+    const r = await $.mcp.connect(SERVIDOR)
+    if (r.isConnected) return 'conectada'
+
+    return r.reason === 'unlisted' ? 'quitada' : 'otra'
+  } catch {
+    return 'otra'
+  }
+}
+
 async function leerApp($: EngineInterface): Promise<SesionApp | null> {
   try {
     return aSesionApp(JSON.parse(await pedirApp($, 'get_session', { session_id: 'self' })))
@@ -171,6 +199,8 @@ function conLimite<T>($: EngineInterface, p: Promise<T>, ms: number): Promise<T 
 
 let carpetaInicial = ''
 let enCurso: Promise<boolean> | null = null
+// Si el último registro falló porque Claude no tenía la conexión (y no por el servicio).
+let registroSinConexion = false
 let reintento: Timer | undefined
 // Si se armaron las instrucciones desde el último mensaje que las esperaba.
 let compusoDesdeMensaje = true
@@ -197,6 +227,7 @@ async function preparar($: EngineInterface, dada?: SesionApp | null): Promise<bo
       grupo: sinConfirmar,
       resumen: null,
       error: 'no sé el id de esta conversación',
+      sinConexion: null,
     }))
 
     return false
@@ -212,10 +243,17 @@ async function preparar($: EngineInterface, dada?: SesionApp | null): Promise<bo
       },
     })
     const grupo = grupoDelResumen(resumen) ?? sinConfirmar
-    await update($, contexto, () => ({ ...base, grupo, resumen, error: null }))
+    // Si respondió, la conexión está: lo que se hubiera anotado de antes ya no vale.
+    await update($, contexto, () => ({ ...base, grupo, resumen, error: null, sinConexion: null }))
+    registroSinConexion = false
+    const como = await conexion($)
+    if (como === 'conectada') conectarSabe = true
+    // La memoria acaba de responder: un Claude que igual dice «no listada» no sabe.
+    else if (como === 'quitada') conectarSabe ??= false
 
     return true
   } catch (err) {
+    registroSinConexion = fueSinConexion(err)
     await update($, contexto, prev => {
       // Si es la misma conversación en el mismo grupo del costado, lo que ya
       // se sabía (el grupo y su resumen) sirve más que nada.
@@ -225,7 +263,8 @@ async function preparar($: EngineInterface, dada?: SesionApp | null): Promise<bo
         ...base,
         grupo: igual ? prev.grupo : sinConfirmar,
         resumen: igual ? prev.resumen : null,
-        error: motivoDe(err),
+        error: motivoDelPedido(err),
+        sinConexion: igual ? prev.sinConexion : null,
       }
     })
 
@@ -726,11 +765,45 @@ async function revisarGrupo($: EngineInterface): Promise<void> {
   await lanzar($, 0, app)
 }
 
+// Antes de cada mensaje: si Claude le quitó la conexión a la conversación,
+// queda anotado (Claude se entera con ese mismo mensaje) y el aviso va al
+// chat, una vez por cada vez que pasa. Solo vale después de que Claude la
+// haya dado por conectada en esta carga del mod: una conexión que todavía se
+// está conectando, o que nunca conectó, no es esto. Cuando el mod se recarga
+// la conexión vuelve, y `preparar` la da por recuperada.
+async function revisarConexion($: EngineInterface): Promise<void> {
+  if (conectarSabe === false || enCurso) return
+  const previo = await read($, contexto)
+  if (!previo) return
+  const como = await conexion($)
+  if (como === 'conectada') {
+    conectarSabe = true
+    // Está, y lo último que se supo es que no: volvió sin que el mod se
+    // recargara, o el registro falló por eso (el mod se recargó un instante
+    // antes que la conexión). Se registra ahora, sin esperar al reintento.
+    if (previo.sinConexion !== null || registroSinConexion) {
+      await lanzar($)
+      await update($, contexto, prev => (prev && prev.sinConexion !== null ? { ...prev, sinConexion: null } : prev))
+    }
+
+    return
+  }
+  if (como !== 'quitada' || conectarSabe !== true || previo.sinConexion !== null) return
+  const avisada = await $.session
+    .append({ message: { type: 'system', content: [{ type: 'text', text: AVISO_SIN_CONEXION }] } })
+    .then(
+      puesto => puesto.deny === undefined,
+      () => false,
+    )
+  await update($, contexto, prev => (prev ? { ...prev, sinConexion: { avisada } } : prev))
+}
+
 function estado(c: Contexto | null, e: Entrega, a: Agentes): string {
   if (!c) return 'Memoria: todavía no registré esta conversación.'
   const lineas = [`Memoria: grupo ${c.grupo}, conversación ${c.sesion}.`]
   if (!c.deLaApp) lineas.push('El grupo salió de la carpeta (la app no respondió).')
-  lineas.push(c.error === null ? 'El servicio respondió bien.' : `El servicio no respondió: ${c.error}`)
+  if (c.sinConexion !== null) lineas.push(AVISO_SIN_CONEXION)
+  else lineas.push(c.error === null ? 'El servicio respondió bien.' : `El servicio no respondió: ${c.error}`)
   if (e.clave !== claveDe(c)) lineas.push('Claude recibe esto con tu próximo mensaje.')
   for (const agente of Object.values(a.lanzados)) {
     if (!agente.anulado && !agente.aviso) lineas.push(`Un agente trabaja de fondo en la mejora ${agente.mejora}.`)
@@ -806,6 +879,7 @@ export const register: Register = on => {
     if (porLanzar) await lanzarPendientes($)
     await conLimite($, revisarGrupo($), ESPERA_REVISION_MS)
     if (enCurso) await conLimite($, enCurso, ESPERA_INSTRUCCIONES_MS)
+    await conLimite($, revisarConexion($), ESPERA_REVISION_MS)
     const c = await read($, contexto)
     const ya = await read($, entrega)
     // Todavía no se armaron las instrucciones: las de este pedido la traen.
@@ -815,7 +889,7 @@ export const register: Register = on => {
       return next(e)
     }
     if (!c || ya.clave === claveDe(c)) return next(e)
-    const texto = ya.clave === null ? seccion(c) : actualizacion(c)
+    const texto = ya.clave === null ? seccion(c) : actualizacion(c, ya.clave)
     const clave = claveDe(c)
     const volver = () => update($, entrega, prev => (prev.clave === clave ? { ...prev, clave: ya.clave } : prev))
     // Se marca antes, para que dos mensajes seguidos no la adjunten dos veces.
@@ -957,6 +1031,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'memoria' }, async $ => {
     await lanzar($)
+    await revisarConexion($)
 
     return { text: estado(await read($, contexto), await read($, entrega), await read($, agentes)) }
   })

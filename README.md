@@ -2,7 +2,7 @@
 
 Memoria a largo plazo por grupo (empresa › proyecto, como ACME › Portal) para las conversaciones con Claude. Corre de fondo en tu Mac, guarda decisiones, errores resueltos, cambios, acuerdos con el cliente y pendientes en un archivo propio, y Claude la consulta y la completa sola en cada conversación. El diseño completo está en [docs/diseno.md](docs/diseno.md).
 
-**Estado:** versión 0.8. Busca por palabras y por significado, une las notas repetidas, lleva la cuenta de qué nota reemplazó a cuál, lee lo conversado, cuando falla se puede arreglar sola si el usuario acepta, y aprende cómo escribe quien la usa para que Claude redacte en su nombre con su estilo. El recorrido del historial viejo (etapa 4) todavía no está.
+**Estado:** versión 0.9. Busca por palabras y por significado, une las notas repetidas, lleva la cuenta de qué nota reemplazó a cuál, lee lo conversado, cuando falla se puede arreglar sola si el usuario acepta, y aprende cómo escribe quien la usa para que Claude redacte en su nombre con su estilo. El recorrido del historial viejo (etapa 4) todavía no está.
 
 **No necesita nada instalado aparte.** Desde la versión 0.4 la base es un solo archivo (`~/.memoria/memoria.db`, SQLite) y el modelo que calcula las huellas de significado corre dentro del servicio. Ya no hacen falta Postgres ni Ollama (Ollama queda como opción para quien lo prefiera).
 
@@ -197,6 +197,14 @@ MEMORIA_NOMBRE=Ana ./instalacion/instalar.sh
 
 Al empezar cada conversación, el mod suma a sus instrucciones la sección «Memoria del grupo»: las reglas de uso, el id de la conversación y el resumen del grupo. La app arma esas instrucciones una sola vez. Si después la conversación pasa a otro grupo del costado, o el mod se carga con la conversación ya empezada, el mod se lo adjunta a Claude con el próximo mensaje, una sola vez. El comando `/memoria` muestra en qué grupo quedó la conversación.
 
+**Si una conversación se queda sin la memoria, el mod lo avisa.** Antes de cada mensaje le pregunta a Claude si la conversación sigue teniendo la conexión (no le pide nada al servicio). Si Claude se la quitó, cosa que les pasa a las que ya estaban abiertas cuando se instaló la memoria (ver «Instalar o actualizar»):
+
+- deja una línea a la vista en el chat, una sola vez por corte, que dice cómo recuperarla: cerrar Claude del todo y abrirlo de nuevo;
+- se lo adjunta a Claude con ese mismo mensaje, para que no trabaje como si la tuviera ni diga que guardó algo;
+- `/memoria` lo muestra, y cuando la conexión vuelve Claude también se entera.
+
+No avisa si la memoria se apagó a propósito en esa conversación, ni mientras una conexión todavía se está conectando. Necesita un Claude Code que le sepa decir a un mod si una conexión está: anda con 2.1.325; con 2.1.321 el aviso no sale.
+
 ## Instalar o actualizar
 
 Hace falta Rust para compilar (`brew install rustup`, después `rustup default stable`) y Claude Code. Nada más: ni base de datos ni Ollama.
@@ -208,6 +216,10 @@ Hace falta Rust para compilar (`brew install rustup`, después `rustup default s
 Todos los comandos de este documento se corren parado en la carpeta del repositorio.
 
 Compila el servicio y el guardián, los copia a `~/.memoria/bin/` (guarda el servicio anterior como `memoria.anterior`), crea la base (`~/.memoria/memoria.db`), baja el modelo de huellas si falta (192 MB, una sola vez, a `~/.memoria/modelos/`), deja en `~/.memoria/codigo` la versión del código que se instaló, instala los agentes `personal-memory.memoria` y `personal-memory.guardian` para que arranquen con la sesión de macOS, espera a que el servicio responda, da de alta el MCP `memoria` para todas las conversaciones, copia el mod a `~/.memoria/catalogo` y lo da de alta en Claude. Se puede correr las veces que haga falta. El guardián solo se actualiza así, a mano.
+
+**Si Claude estaba abierto al instalar por primera vez, cerralo del todo y volvé a abrirlo.** Claude toma bien una conexión solo cuando arranca. Una conversación que ya estaba abierta cuando se dio de alta el MCP `memoria` lo recibe más tarde, al recargarse el mod, y lo pierde sola cada tanto, sin que Claude diga nada: las herramientas de la memoria desaparecen de esa conversación hasta la próxima recarga (el mod lo avisa en el chat cuando pasa). Y si lo que cambia es la clave o la dirección, la conversación abierta sigue usando la anterior y la memoria deja de responderle. En la app es salir (⌘Q) y abrirla de nuevo; en una terminal, salir de cada `claude` y volver a entrar. Las conversaciones que ya existían siguen ahí, y desde entonces quedan bien conectadas.
+
+El instalador lo avisa al terminar solo cuando hace falta: cuando da de alta la conexión o la cambia. En una actualización común la conexión no se toca y no hay que reiniciar nada. (Visto y reproducido con Claude Code 2.1.321 y 2.1.325, el de la app de escritorio.)
 
 Para instalar en otra carpeta:
 
@@ -232,6 +244,7 @@ Para sacarlo (la base, los respaldos y el modelo quedan en `~/.memoria`):
 - Respaldos: `~/.memoria/respaldos/` (uno por día, 14 días; uno antes de cada migración y uno antes de instalar cada mejora). Cada respaldo es la base entera en un archivo: para volver a ese momento se apaga el servicio y se copia el respaldo en el lugar de `~/.memoria/memoria.db` (borrando, si están, `memoria.db-wal` y `memoria.db-shm`).
 - Mejoras: la tabla `mejoras` de la base tiene cada una con su estado, el motivo si falló, qué cambió, de qué versión a cuál y el puntaje de la batería antes y después.
 - Clave local: `~/.memoria/clave` (solo legible por el usuario). La usa el alta del MCP.
+- Si en una conversación Claude no encuentra las herramientas de la memoria y el servicio responde bien en `/salud`, lo más probable es que esa conversación esté abierta desde antes de dar de alta la conexión (o de cambiarla). Se arregla cerrando Claude del todo y abriéndolo de nuevo: ver «Instalar o actualizar». `/memoria` dice si la conversación tiene la conexión.
 - Para mirar adentro: `sqlite3 ~/.memoria/memoria.db`, o el archivo abierto en DBeaver o cualquier visor de SQLite.
 
 ## Desarrollo
