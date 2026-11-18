@@ -21,6 +21,9 @@
   <dict>
     <key>MEMORIA_DIR</key>
     <string>__DIR__</string>
+    <!-- El agente que copia WhatsApp, si está instalado; vacío si no. -->
+    <key>MEMORIA_WHATSAPP_COPIADOR</key>
+    <string>__COPIADOR__</string>
   </dict>
 
   <key>WorkingDirectory</key>

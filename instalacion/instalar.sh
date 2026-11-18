@@ -62,6 +62,7 @@ CODIGO="$DIR/codigo"
 CATALOGO="$DIR/catalogo"
 ETIQUETA="personal-memory.memoria"
 GUARDIAN="personal-memory.guardian"
+COPIADOR="personal-memory.whatsapp"
 CATALOGO_NOMBRE="personal-memory"
 MOD="memoria@$CATALOGO_NOMBRE"
 AGENTES="$CASA/Library/LaunchAgents"
@@ -124,6 +125,7 @@ arrancar() {
   local etiqueta="$1" archivo="$AGENTES/$1.plist"
   mkdir -p "$AGENTES"
   sed -e "s#__CASA__#$CASA#g" -e "s#__DIR__#$DIR#g" \
+    -e "s#__BASE__#${BASE_WHATSAPP:-}#g" -e "s#__COPIADOR__#${COPIADOR_PUESTO:-}#g" \
     "$REPO/instalacion/$etiqueta.plist" > "$archivo"
   plutil -lint -s "$archivo"
   if launchctl print "$DOMINIO/$etiqueta" >/dev/null 2>&1; then
@@ -131,7 +133,10 @@ arrancar() {
     sleep 1
   fi
   launchctl bootstrap "$DOMINIO" "$archivo"
-  launchctl kickstart -k "$DOMINIO/$etiqueta"
+  # El que copia WhatsApp no arranca solo: lo despierta el servicio cuando lo necesita.
+  if [[ "$etiqueta" != "$COPIADOR" ]]; then
+    launchctl kickstart -k "$DOMINIO/$etiqueta"
+  fi
 }
 
 # Reemplaza un archivo de <carpeta>/bin de una sola vez (nunca queda a medio copiar).
@@ -165,7 +170,7 @@ if [[ -n "$VERSION" && -d "$CODIGO/.git" ]]; then
 fi
 
 paso "Compilando el servicio y el guardián (la primera vez tarda unos minutos)"
-(cd "$REPO" && cargo build --release --locked -p memoria -p guardian)
+(cd "$REPO" && cargo build --release --locked -p memoria -p guardian -p copiador)
 
 # Mientras se instala a mano no tiene que haber nadie usando la base: ni el
 # guardián instalando una mejora ni el servicio anterior escribiendo.
@@ -241,6 +246,33 @@ if [[ -n "$VERSION" ]]; then
 else
   print -r -- "sin-guardar" > "$DIR/instalada"
   echo "Hay cambios sin guardar en git: las mejoras automáticas quedan en pausa hasta guardarlos y correr de nuevo este instalador." >&2
+fi
+
+# WhatsApp lo copia un programa aparte, con su propio agente: el permiso de
+# macOS («Acceso total al disco») va atado al programa exacto, así que se
+# reemplaza solo cuando cambia su versión, que casi nunca cambia. Si lo
+# copiara el servicio, macOS volvería a preguntar después de cada instalación.
+COPIADOR_PUESTO=""
+if grep -iq '^MEMORIA_FUENTES=.*whatsapp' "$AJUSTES"; then
+  paso "Programa que copia WhatsApp (memoria-whatsapp)"
+  NUEVA_COPIADOR="$("$REPO/target/release/memoria-whatsapp" --version)"
+  INSTALADA_COPIADOR="$("$DIR/bin/memoria-whatsapp" --version 2>/dev/null || true)"
+  if [[ "$NUEVA_COPIADOR" != "$INSTALADA_COPIADOR" ]]; then
+    copiar "$REPO/target/release/memoria-whatsapp"
+    print -P "%F{yellow}!%f Falta darle a memoria-whatsapp «Acceso total al disco» (una sola vez, hasta que cambie su versión):"
+    print -r -- "  Ajustes del Sistema › Privacidad y seguridad › Acceso total al disco › «+»;"
+    print -r -- "  en la ventana, ⌘⇧G y $DIR/bin/memoria-whatsapp, «Abrir», y dejarlo prendido."
+    print -r -- "  Sin eso, macOS pregunta con un cartel cada vez que se reinicia la memoria."
+  else
+    echo "memoria-whatsapp $INSTALADA_COPIADOR ya estaba: no se toca, así conserva el permiso."
+  fi
+  BASE_WHATSAPP="$(grep '^MEMORIA_WHATSAPP=' "$AJUSTES" | cut -d= -f2- || true)"
+  BASE_WHATSAPP="${BASE_WHATSAPP:-$CASA/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite}"
+  arrancar "$COPIADOR"
+  COPIADOR_PUESTO="$COPIADOR"
+elif launchctl print "$DOMINIO/$COPIADOR" >/dev/null 2>&1; then
+  launchctl bootout "$DOMINIO/$COPIADOR" || true
+  rm -f "$AGENTES/$COPIADOR.plist"
 fi
 
 paso "Agente de arranque del servicio"

@@ -22,7 +22,7 @@ claude_bin() {
 }
 CLAUDE="$(claude_bin)"
 
-for ETIQUETA in personal-memory.guardian personal-memory.memoria; do
+for ETIQUETA in personal-memory.guardian personal-memory.memoria personal-memory.whatsapp; do
   launchctl bootout "gui/$(id -u)/$ETIQUETA" 2>/dev/null && echo "$ETIQUETA apagado."
   rm -f "$HOME/Library/LaunchAgents/$ETIQUETA.plist"
 done

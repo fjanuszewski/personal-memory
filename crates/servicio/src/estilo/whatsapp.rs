@@ -12,11 +12,18 @@
 //! programa que lo pidió. Por eso lee el servicio, que vive días, y no cada
 //! conversación de Claude; y por eso la copia se hace en un hilo aparte, que
 //! puede quedar esperando la respuesta todo lo que haga falta.
+//!
+//! Pero el servicio se reinicia con cada instalación, y el cartel volvía.
+//! Si está instalado el programa aparte que copia la base (`memoria-whatsapp`,
+//! un agente de launchd propio), la copia la hace él: el permiso de «Acceso
+//! total al disco» se le da una sola vez, y el servicio solo lo despierta y
+//! lee lo que dejó.
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -25,7 +32,7 @@ use sqlx::{ConnectOptions, SqlitePool};
 
 use super::fuentes::excluido;
 use super::propios::{self, Propio};
-use crate::config::WhatsApp;
+use crate::config::{Copiador, WhatsApp};
 use crate::texto;
 
 pub const FUENTE: &str = "whatsapp";
@@ -46,6 +53,11 @@ const REENVIADO: i64 = 0x180;
 /// persona, de grupo, o con alguien cuyo número no se ve. Los estados, las
 /// listas de difusión y los canales terminan de otra forma y no se leen.
 const DE_CHAT: [&str; 3] = ["@s.whatsapp.net", "@g.us", "@lid"];
+/// Cada cuánto se mira si el programa aparte ya dejó la copia.
+const MIRAR_CADA: Duration = Duration::from_millis(300);
+/// Cuánto se lo espera. Con el permiso tarda unos segundos; sin él, espera
+/// a que el usuario conteste el cartel de macOS.
+const ESPERA_COPIADOR: Duration = Duration::from_mins(30);
 
 /// Lo que salió de leer WhatsApp.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -163,6 +175,56 @@ async fn copiar(base: PathBuf) -> anyhow::Result<Copia> {
     espera.await.context("se cortó la copia de la base de WhatsApp")?
 }
 
+/// Despierta al programa aparte que copia la base y espera lo que deje: la
+/// copia (`lista`), que pasa a ser de esta lectura, o por qué no pudo (`error`).
+async fn copiar_con(copiador: &Copiador) -> anyhow::Result<Copia> {
+    static CUENTA: AtomicU32 = AtomicU32::new(0);
+    let lista = copiador.carpeta.join("lista");
+    let error = copiador.carpeta.join("error");
+    // Lo que haya quedado de antes no sirve: puede ser viejo.
+    let _ = tokio::fs::remove_dir_all(&lista).await;
+    let _ = tokio::fs::remove_file(&error).await;
+    let (programa, argumentos) =
+        copiador.orden.split_first().context("falta la orden del programa que copia WhatsApp")?;
+    let salida = tokio::process::Command::new(programa)
+        .args(argumentos)
+        .output()
+        .await
+        .with_context(|| format!("no pude despertar al programa que copia la base de WhatsApp ({programa})"))?;
+    if !salida.status.success() {
+        anyhow::bail!(
+            "no pude despertar al programa que copia la base de WhatsApp: {} (¿está instalado?)",
+            String::from_utf8_lossy(&salida.stderr).trim()
+        );
+    }
+    let inicio = Instant::now();
+    loop {
+        if tokio::fs::try_exists(&lista).await.unwrap_or(false) {
+            let numero = CUENTA.fetch_add(1, Ordering::Relaxed);
+            let carpeta = copiador.carpeta.join(format!("leyendo-{}-{numero}", std::process::id()));
+            let _ = tokio::fs::remove_dir_all(&carpeta).await;
+            tokio::fs::rename(&lista, &carpeta)
+                .await
+                .with_context(|| format!("no pude tomar la copia de WhatsApp ({})", lista.display()))?;
+            return Ok(Copia { carpeta });
+        }
+        if let Ok(motivo) = tokio::fs::read_to_string(&error).await {
+            let _ = tokio::fs::remove_file(&error).await;
+            anyhow::bail!(
+                "{} (lo dice el programa que copia la base; si macOS no lo dejó, le falta «Acceso total al disco»)",
+                motivo.trim()
+            );
+        }
+        if inicio.elapsed() > ESPERA_COPIADOR {
+            anyhow::bail!(
+                "el programa que copia la base de WhatsApp no terminó en media hora: puede estar esperando que \
+                 alguien le conteste a macOS (le falta «Acceso total al disco»)"
+            );
+        }
+        tokio::time::sleep(MIRAR_CADA).await;
+    }
+}
+
 type Fila = (i64, String, f64, i64, Option<String>, Option<String>);
 
 /// Los mensajes de texto que mandó el usuario, desde el que sigue a `desde`.
@@ -264,7 +326,10 @@ async fn juntar_de(
 /// ver qué entraría antes de encender la fuente. Puede tardar lo que tarde el
 /// usuario en contestarle a macOS si deja leer.
 pub async fn juntar(pool: &SqlitePool, cfg: &WhatsApp, nombre: &str, anotar: bool) -> anyhow::Result<Juntado> {
-    let copia = copiar(cfg.base.clone()).await?;
+    let copia = match &cfg.copiador {
+        Some(copiador) => copiar_con(copiador).await?,
+        None => copiar(cfg.base.clone()).await?,
+    };
     // Es una base ajena, sin índices para lo que se le pregunta: que una
     // consulta tarde un segundo es lo esperado, y no va al registro.
     let whatsapp = SqlitePoolOptions::new()

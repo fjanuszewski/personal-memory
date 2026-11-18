@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Agente de launchd que copia la base de WhatsApp Desktop para la memoria.
+  No arranca solo: lo despierta el servicio cada vez que va a leer WhatsApp
+  (`launchctl kickstart`). Es un agente aparte, y no un programa que lanza el
+  servicio, porque macOS le pide el permiso a quien lanzó el programa: así
+  el «Acceso total al disco» se le da a este programa, que casi nunca
+  cambia, y no se pierde cada vez que se actualiza el servicio.
+  `instalar.sh` reemplaza __DIR__, __CASA__ y __BASE__ (la base de WhatsApp).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>personal-memory.whatsapp</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__DIR__/bin/memoria-whatsapp</string>
+    <string>__BASE__</string>
+    <string>__DIR__/whatsapp</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__DIR__</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__CASA__/Library/Logs/memoria/whatsapp-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__CASA__/Library/Logs/memoria/whatsapp-launchd.log</string>
+</dict>
+</plist>

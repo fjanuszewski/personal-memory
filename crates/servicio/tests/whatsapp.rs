@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use comun::estado;
-use memoria::config::{Fuentes, WhatsApp};
+use memoria::config::{Copiador, Fuentes, WhatsApp};
 use memoria::estilo::fuentes::{self, Fuente};
 use memoria::estilo::whatsapp::{self, Juntado};
 use memoria::mcp::{self, PedidoEstilo};
@@ -120,7 +120,7 @@ async fn cargar(whatsapp: &SqlitePool) {
 }
 
 fn ajustes(archivo: &Path) -> WhatsApp {
-    WhatsApp { base: archivo.to_owned(), sin: vec!["familia".into()] }
+    WhatsApp { base: archivo.to_owned(), sin: vec!["familia".into()], copiador: None }
 }
 
 type Guardado = (String, String, Option<String>, Option<String>, String);
@@ -344,7 +344,7 @@ async fn se_lee_cuando_toca_y_no_se_insiste_si_fallo() {
 
     // Si no se puede leer, queda anotado, no se insiste enseguida y quien pregunta cómo escribe se entera.
     let rota = Fuentes {
-        whatsapp: Some(WhatsApp { base: archivo.with_file_name("no-existe.sqlite"), sin: vec![] }),
+        whatsapp: Some(WhatsApp { base: archivo.with_file_name("no-existe.sqlite"), sin: vec![], copiador: None }),
         slack: None,
     };
     let (bien, resumen) = fuentes::juntar(&pool, &rota, "Ana").await.unwrap();
@@ -364,4 +364,64 @@ async fn se_lee_cuando_toca_y_no_se_insiste_si_fallo() {
     e.leyendo_whatsapp.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
     assert_eq!(fuentes::aviso(&e).await.unwrap(), None);
     de_whatsapp.close().await;
+}
+
+/// Un programa aparte de mentira que hace lo mismo que `memoria-whatsapp`:
+/// arma la copia y la deja de una vez en `<carpeta>/lista`.
+fn copiador_de_mentira(base: &Path, carpeta: &Path) -> Copiador {
+    let orden = format!(
+        "mkdir -p '{c}/armando' && cp '{b}' '{c}/armando/ChatStorage.sqlite' && mv '{c}/armando' '{c}/lista'",
+        b = base.display(),
+        c = carpeta.display()
+    );
+    Copiador { orden: vec!["sh".into(), "-c".into(), orden], carpeta: carpeta.to_owned() }
+}
+
+#[tokio::test]
+async fn con_el_programa_aparte_lee_la_copia_que_deja_el() {
+    let base = comun::Base::nueva().await;
+    let (archivo, de_whatsapp) = base_de_whatsapp("aparte").await;
+    cargar(&de_whatsapp).await;
+    let carpeta = archivo.with_file_name("copias");
+    // Una copia vieja que quedó de antes no se lee.
+    std::fs::create_dir_all(carpeta.join("lista")).unwrap();
+    let cfg = WhatsApp { copiador: Some(copiador_de_mentira(&archivo, &carpeta)), ..ajustes(&archivo) };
+
+    let juntado = whatsapp::juntar(&base.pool, &cfg, "Ana", true).await.unwrap();
+    assert_eq!(juntado, Juntado { leidos: 12, propios: 10, nuevos: 10, chats: 3 });
+    // Después de leer no queda ninguna copia: adentro estaban todos los chats.
+    assert_eq!(std::fs::read_dir(&carpeta).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn si_el_programa_aparte_no_puede_se_sabe_por_que() {
+    let base = comun::Base::nueva().await;
+    let (archivo, _) = base_de_whatsapp("aparte-falla").await;
+    let carpeta = archivo.with_file_name("copias");
+    std::fs::create_dir_all(&carpeta).unwrap();
+
+    // Deja el motivo, como cuando macOS no lo deja leer.
+    let orden = format!(
+        "printf 'no pude leer la base de WhatsApp (x): Operation not permitted' > '{}/error'",
+        carpeta.display()
+    );
+    let cfg = WhatsApp {
+        copiador: Some(Copiador { orden: vec!["sh".into(), "-c".into(), orden], carpeta: carpeta.clone() }),
+        ..ajustes(&archivo)
+    };
+    let falla = whatsapp::juntar(&base.pool, &cfg, "Ana", true).await.unwrap_err().to_string();
+    assert!(falla.starts_with("no pude leer la base de WhatsApp (x): Operation not permitted"), "{falla}");
+    assert!(falla.contains("Acceso total al disco"), "{falla}");
+    assert!(!carpeta.join("error").exists());
+
+    // No está instalado: launchd no lo encuentra.
+    let cfg = WhatsApp {
+        copiador: Some(Copiador {
+            orden: vec!["sh".into(), "-c".into(), "echo 'Could not find service' >&2; exit 113".into()],
+            carpeta: carpeta.clone(),
+        }),
+        ..ajustes(&archivo)
+    };
+    let falla = whatsapp::juntar(&base.pool, &cfg, "Ana", true).await.unwrap_err().to_string();
+    assert!(falla.contains("no pude despertar") && falla.contains("Could not find service"), "{falla}");
 }

@@ -28,6 +28,20 @@ pub struct WhatsApp {
     /// Chats que quedan afuera: los que tienen alguno de estos textos en el
     /// nombre (`MEMORIA_WHATSAPP_SIN`, separados por punto y coma).
     pub sin: Vec<String>,
+    /// El programa aparte que hace la copia de la base, si está instalado
+    /// (`MEMORIA_WHATSAPP_COPIADOR`). Sin él, la copia la hace el servicio.
+    pub copiador: Option<Copiador>,
+}
+
+/// El programa que copia la base de WhatsApp (punto 4.11 del diseño): un
+/// agente de launchd aparte, para que el permiso de macOS sea suyo y no se
+/// pierda cada vez que se actualiza el servicio.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Copiador {
+    /// La orden que lo despierta (`launchctl kickstart gui/<usuario>/<etiqueta>`).
+    pub orden: Vec<String>,
+    /// Donde deja la copia (`lista`) o por qué no pudo (`error`).
+    pub carpeta: PathBuf,
 }
 
 /// De dónde sale la llave de un espacio de Slack.
@@ -201,8 +215,14 @@ fn leer_espacios(texto: Option<&str>) -> anyhow::Result<Vec<Espacio>> {
 /// la base (`MEMORIA_WHATSAPP`, o la de siempre dentro de `casa`) y qué chats
 /// quedan afuera (`MEMORIA_WHATSAPP_SIN`); de Slack, los espacios de trabajo
 /// (`MEMORIA_SLACK`) y qué canales y personas quedan afuera
-/// (`MEMORIA_SLACK_SIN`).
-fn leer_fuentes(texto: Option<&str>, casa: &Path, var: &dyn Fn(&str) -> Option<String>) -> anyhow::Result<Fuentes> {
+/// (`MEMORIA_SLACK_SIN`). Si la copia de WhatsApp la hace el agente aparte
+/// (`MEMORIA_WHATSAPP_COPIADOR`, su etiqueta de launchd), la deja en `dir`.
+fn leer_fuentes(
+    texto: Option<&str>,
+    casa: &Path,
+    dir: &Path,
+    var: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<Fuentes> {
     let mut fuentes = Fuentes::default();
     for nombre in texto.unwrap_or_default().split(',').map(|n| n.trim().to_lowercase()).filter(|n| !n.is_empty()) {
         match nombre.as_str() {
@@ -211,6 +231,7 @@ fn leer_fuentes(texto: Option<&str>, casa: &Path, var: &dyn Fn(&str) -> Option<S
                 fuentes.whatsapp = Some(WhatsApp {
                     base: var("MEMORIA_WHATSAPP").map_or_else(|| casa.join(BASE_DE_WHATSAPP), PathBuf::from),
                     sin: lista(var("MEMORIA_WHATSAPP_SIN").as_deref()),
+                    copiador: var("MEMORIA_WHATSAPP_COPIADOR").map(|etiqueta| copiador(casa, dir, etiqueta.trim())),
                 });
             }
             "slack" => {
@@ -225,6 +246,16 @@ fn leer_fuentes(texto: Option<&str>, casa: &Path, var: &dyn Fn(&str) -> Option<S
         }
     }
     Ok(fuentes)
+}
+
+/// El agente que copia la base de WhatsApp, del usuario dueño de `casa`.
+fn copiador(casa: &Path, dir: &Path, etiqueta: &str) -> Copiador {
+    use std::os::unix::fs::MetadataExt;
+    let usuario = std::fs::metadata(casa).map_or(501, |datos| datos.uid());
+    Copiador {
+        orden: vec!["launchctl".to_owned(), "kickstart".to_owned(), format!("gui/{usuario}/{etiqueta}")],
+        carpeta: dir.join("whatsapp"),
+    }
 }
 
 /// Lee el archivo de ajustes (`<carpeta>/ajustes`): renglones `NOMBRE=valor`
@@ -305,7 +336,7 @@ impl Config {
             hilos,
             umbrales: var("MEMORIA_UMBRALES").as_deref().map(leer_umbrales).transpose()?,
             conversaciones: var("MEMORIA_CONVERSACIONES").map_or_else(|| casa.join(".claude/projects"), PathBuf::from),
-            fuentes: leer_fuentes(var("MEMORIA_FUENTES").as_deref(), &casa, &var)?,
+            fuentes: leer_fuentes(var("MEMORIA_FUENTES").as_deref(), &casa, &dir, &var)?,
             dir,
         })
     }
@@ -344,7 +375,7 @@ mod pruebas {
     /// Lee las fuentes con estos ajustes puestos, como si vinieran del entorno.
     fn fuentes_con(texto: Option<&str>, puestos: &[(&str, &str)]) -> anyhow::Result<Fuentes> {
         let var = |nombre: &str| puestos.iter().find(|(n, _)| *n == nombre).map(|(_, valor)| (*valor).to_owned());
-        leer_fuentes(texto, Path::new("/Users/ana"), &var)
+        leer_fuentes(texto, Path::new("/Users/ana"), Path::new("/Users/ana/.memoria"), &var)
     }
 
     #[test]
@@ -359,6 +390,14 @@ mod pruebas {
         assert_eq!(whatsapp.sin, vec!["Familia", "Los del colegio"]);
         let en_otro_lado = fuentes_con(Some("whatsapp"), &[("MEMORIA_WHATSAPP", "/tmp/copia.sqlite")]).unwrap();
         assert_eq!(en_otro_lado.whatsapp.unwrap().base, Path::new("/tmp/copia.sqlite"));
+        // Sin el programa aparte, la copia la hace el servicio; con él, lo despierta launchd.
+        assert_eq!(whatsapp.copiador, None);
+        let con_copiador =
+            fuentes_con(Some("whatsapp"), &[("MEMORIA_WHATSAPP_COPIADOR", " personal-memory.whatsapp ")]).unwrap();
+        let copiador = con_copiador.whatsapp.unwrap().copiador.unwrap();
+        assert_eq!(copiador.carpeta, Path::new("/Users/ana/.memoria/whatsapp"));
+        assert_eq!(copiador.orden[..2], ["launchctl", "kickstart"]);
+        assert!(copiador.orden[2].starts_with("gui/") && copiador.orden[2].ends_with("/personal-memory.whatsapp"));
         // «ninguna» las apaga todas, y una fuente desconocida no pasa de largo.
         assert_eq!(fuentes_con(Some("whatsapp, ninguna"), &[]).unwrap(), Fuentes::default());
         assert!(fuentes_con(Some("telegrama"), &[]).is_err());

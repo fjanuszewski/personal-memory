@@ -1,0 +1,22 @@
+[package]
+name = "copiador"
+# Versión propia, aparte de la del resto: macOS reconoce el permiso de
+# «Acceso total al disco» por el programa exacto, y el instalador lo cambia
+# solo cuando cambia este número. Subirlo obliga al usuario a dar el permiso
+# de nuevo: hacerlo solo si de verdad hace falta.
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Copia la base de WhatsApp Desktop para la memoria: lo único que necesita el permiso de macOS"
+
+[[bin]]
+name = "memoria-whatsapp"
+path = "src/main.rs"
+
+# Sin dependencias a propósito: es el programa con más permiso de todos y
+# tiene que poder leerse entero de una sentada.
+[dependencies]
+
+[lints]
+workspace = true

@@ -368,6 +368,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "copiador"
+version = "1.0.0"
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -982,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "guardian"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1582,7 +1586,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memoria"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "axum",
